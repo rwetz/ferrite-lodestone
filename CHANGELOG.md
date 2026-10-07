@@ -4,6 +4,16 @@ All notable changes to Lodestone are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-07
+
+### Fixed
+
+- Windows: the executable, window and taskbar now show the Lodestone logo
+  instead of the generic application icon, and Task Manager lists it as
+  "Lodestone".
+- README: a downloaded Lodestone needs a folder (`LODESTONE_ROOT` or an
+  argument) to find apps, and apps are discovered from source checkouts.
+
 ## [0.1.0] - 2026-10-06
 
 The first release.
@@ -25,4 +35,5 @@ The first release.
 - The workspace folder comes from the command line, `LODESTONE_ROOT`, the
   checkout's parent folder, or the current directory, in that order.
 
+[0.1.1]: https://github.com/rwetz/ferrite-lodestone/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rwetz/ferrite-lodestone/releases/tag/v0.1.0

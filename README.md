@@ -59,7 +59,17 @@ Prebuilt binaries for Windows, macOS and Linux are attached to each
 [release](https://github.com/rwetz/ferrite-lodestone/releases/latest).
 Unpack the archive and run `lodestone`. Launching apps needs a Rust
 toolchain (`cargo`) on your `PATH`, because Lodestone builds each app
-before starting it.
+from its source checkout before starting it; downloaded app binaries
+aren't discovered.
+
+A downloaded Lodestone isn't inside a checkout, so tell it where your apps
+are (see [Usage](#usage)). Otherwise it scans the folder it was started
+from. On Windows, for example:
+
+```powershell
+setx LODESTONE_ROOT "C:\Users\you\Dev"   # once; new terminals and Explorer pick it up
+.\lodestone.exe C:\Users\you\Dev         # or per launch
+```
 
 ### From source
 
@@ -98,7 +108,7 @@ Dev/
 ├── ferrite-design/      # its examples appear on the Gallery page
 ├── ferrite-lodestone/   # this repo
 ├── ferrite-pulse/       # any crate that depends on ferrite-design
-└── ferrite-desk-clock/
+└── ferrite-almanac/
 ```
 
 New apps come from ferrite-design's scaffold script:
