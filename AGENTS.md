@@ -1,12 +1,13 @@
 # Lodestone
 
 A native desktop app on [ferrite-design](https://github.com/rwetz/ferrite-design)
-(GPUI, Rust), started from the `dashboard` template. It finds
-every Ferrite app in a workspace, builds and launches them, and keeps one
-shared look (scheme, appearance, refresh rate, density) that each launch
-inherits through `FERRITE_*` variables. Discovery, build/launch and the
-shared-look file live in `src/registry.rs` (pure parsing is unit-tested);
-the views live in `src/main.rs`.
+(GPUI, Rust), started from the `dashboard` template. It lists
+the GitHub repos tagged `ferrite-app`, installs an app from its latest
+release (download, SHA-256 check, unpack; never `cargo build`), launches
+it, and keeps one shared look (scheme, appearance, refresh rate, density)
+that each launch inherits through `FERRITE_*` variables. The catalog,
+install/launch and the shared-look file live in `src/registry.rs` (pure
+parsing is unit-tested); the views live in `src/main.rs`.
 
 Before changing UI code, read ferrite-design's AGENTS.md — it is the
 contract for how Ferrite apps are built (components, colors, type, motion,

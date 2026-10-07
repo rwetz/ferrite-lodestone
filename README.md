@@ -6,7 +6,7 @@
 
 <p align="center">
   One window for every <a href="https://github.com/rwetz/ferrite-design">Ferrite</a> app:
-  launch them, watch them, share one look.
+  install them from GitHub, launch them, share one look.
 </p>
 
 <p align="center">
@@ -15,12 +15,13 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-3D3D42?labelColor=18181B" alt="License: Apache-2.0"></a>
 </p>
 
-![Lodestone running the Dashboard template](docs/running.png)
+![Lodestone with Terrarium installed and four apps ready to install](docs/running.png)
 
 A lodestone is the naturally magnetic rock that pulls iron toward it.
-Lodestone does the same for Ferrite apps. It finds every app in your
-workspace, shows each one as a live tile, builds and starts it with one
-click, and holds one shared look that every app it starts inherits.
+Lodestone does the same for Ferrite apps. It finds every Ferrite app on
+GitHub, installs the one you pick from its latest release, starts it with
+one click, and holds one shared look that every app it starts inherits.
+It never compiles anything.
 
 It's a native desktop app built with [GPUI](https://gpui.rs) and
 [ferrite-design](https://github.com/rwetz/ferrite-design): amber on iron,
@@ -28,28 +29,30 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 
 ## Features
 
-- **Discovery.** Lodestone scans a folder one level deep for crates that
-  depend on `ferrite-design`. If ferrite-design itself is checked out there,
-  its examples (the component gallery, the showcase and the seven app
-  templates) appear on a separate Gallery page.
-- **Live tiles.** Each tile shows the app's state (idle, building, running,
-  stopped, exited or failed). While an app runs, the tile shows its process
-  ID and uptime; otherwise it shows the last commit.
-- **Launch and stop.** Lodestone runs `cargo build` in the background, then
-  starts the app's own binary. It holds that real process, so **Stop**
-  actually stops the app. If a build fails, the error shows in the details
-  drawer.
+- **Discovery.** Lodestone lists the public GitHub repos of
+  [rwetz](https://github.com/rwetz) that carry the `ferrite-app` topic,
+  with each one's latest release. The list is cached, so Lodestone opens
+  with your apps offline too.
+- **Install and update.** **Install** downloads the release archive for
+  your platform, checks it against the release's `SHA256SUMS.txt`, and
+  unpacks it. A progress bar shows the download. When a newer release is
+  out, the tile says so and offers **Update**.
+- **Live tiles.** Each tile shows the app's version and how long ago it
+  was released (`v0.1.1 · 8 hours ago`), and its state: not installed,
+  installed, update, installing, running, stopped, exited or failed. While
+  an app runs, the tile shows its process ID and uptime.
+- **Launch and stop.** **Run** starts the installed binary directly, so it
+  opens at once. Lodestone holds that process, so **Stop** really stops it.
 - **Shared look.** Pick a scheme (any of Ferrite's ten), an appearance, a
   refresh rate and a density. Lodestone re-themes at once, saves the choice,
   and hands it to every app it starts as the `FERRITE_*` variables that
   ferrite-design's `theme::apply_env` already reads.
 - **Ferrite throughout.** A boot screen at launch, a command palette
-  (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) with a Launch command for
-  every app, a search filter, and a CRT switch-off when you close the window.
+  (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) with an Install or Launch
+  command for every app, a search filter, and a CRT switch-off when you
+  close the window.
 
-| Gallery | Shared look (Phosphor) |
-|---|---|
-| ![The gallery page](docs/gallery.png) | ![The shared-look page in the Phosphor scheme](docs/shared-look.png) |
+![The shared-look page in the Phosphor scheme](docs/shared-look.png)
 
 ## Install
 
@@ -57,12 +60,8 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 
 Prebuilt binaries for Windows, macOS and Linux are attached to each
 [release](https://github.com/rwetz/ferrite-lodestone/releases/latest).
-Unpack the archive and move `lodestone` into the folder that holds your
-apps: Lodestone scans only the folder it lives in (see [Usage](#usage)), so
-started from Downloads it finds nothing. Launching apps needs a Rust
-toolchain (`cargo`) on your `PATH`, because Lodestone builds each app from
-its source checkout before starting it; downloaded app binaries aren't
-discovered.
+Unpack the archive and run `lodestone` from anywhere. Apps need no Rust
+toolchain: Lodestone downloads their release builds.
 
 ### From source
 
@@ -86,25 +85,31 @@ xcodebuild -downloadComponent MetalToolchain
 
 ## Usage
 
-Lodestone shows only the Ferrite apps in the folder it lives in, one level
-deep:
+Open Lodestone and press **Install** on an app, then **Run**. The refresh
+button checks GitHub again for new apps and updates; Lodestone also checks
+once at every start.
 
-- run from source, that is the folder holding the `ferrite-lodestone` checkout
-- as a downloaded binary, that is the folder you put `lodestone` in
+Installed apps live in one folder per app, with the current version inside:
 
-So keep Lodestone next to your apps:
+| OS | Path |
+|---|---|
+| Windows | `%LOCALAPPDATA%\ferrite\apps\<repo>\<tag>\` |
+| macOS | `~/Library/Application Support/ferrite/apps/…` |
+| Linux | `$XDG_DATA_HOME/ferrite/apps/…` (or `~/.local/share/…`) |
 
-```
-Dev/
-├── ferrite-design/      # its examples appear on the Gallery page
-├── ferrite-lodestone/   # this repo (or just the lodestone binary)
-├── ferrite-pulse/       # any crate that depends on ferrite-design
-└── ferrite-almanac/
-```
+An update unpacks the new version next to the old one and removes the old
+one afterwards (or at the next update, if it was still running).
 
-New apps come from ferrite-design's scaffold script:
-`scripts/new-app.sh ferrite-<thing> <template>`. Press the rescan button and
-they appear.
+GitHub allows 60 anonymous API requests an hour, and a check costs one plus
+one per app. Set `GITHUB_TOKEN` to raise that limit.
+
+### Making an app show up
+
+1. Scaffold it with ferrite-design's `scripts/new-app.sh ferrite-<thing> <template>`.
+   Its release workflow builds Windows, macOS and Linux archives when you
+   push a `v*` tag.
+2. Add the `ferrite-app` topic to the GitHub repo.
+3. Push a tag, wait for the release, and press refresh in Lodestone.
 
 ### The shared look
 
@@ -131,13 +136,13 @@ planned settings store.
 ## Development
 
 ```bash
-cargo test                    # discovery, manifest parsing, the settings file
+cargo test                    # GitHub parsing, checksums, versions, the settings file
 cargo clippy --all-targets
 cargo run
 ```
 
-- `src/registry.rs` covers discovery, building and starting apps, and the
-  shared-look file. Its parsing is pure and unit-tested.
+- `src/registry.rs` covers the GitHub catalog, installing and starting
+  apps, and the shared-look file. Its parsing is pure and unit-tested.
 - `src/main.rs` holds the views. It follows ferrite-design's
   [AGENTS.md](https://github.com/rwetz/ferrite-design/blob/main/AGENTS.md):
   colors only from the palette, one accent, `panel()` for regions, and
