@@ -1,6 +1,6 @@
 [package]
 name = "ferrite-lodestone"
-version = "0.1.0"
+version = "0.1.1"
 description = "One window for every Ferrite app: launch them, watch them, share one look."
 authors = ["Ryan Wetzstein"]
 license = "Apache-2.0"
@@ -29,3 +29,6 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[target."cfg(windows)".build-dependencies]
+winresource = "0.1.31"
