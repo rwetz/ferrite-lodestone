@@ -57,19 +57,12 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 
 Prebuilt binaries for Windows, macOS and Linux are attached to each
 [release](https://github.com/rwetz/ferrite-lodestone/releases/latest).
-Unpack the archive and run `lodestone`. Launching apps needs a Rust
-toolchain (`cargo`) on your `PATH`, because Lodestone builds each app
-from its source checkout before starting it; downloaded app binaries
-aren't discovered.
-
-A downloaded Lodestone isn't inside a checkout, so tell it where your apps
-are (see [Usage](#usage)). Otherwise it scans the folder it was started
-from. On Windows, for example:
-
-```powershell
-setx LODESTONE_ROOT "C:\Users\you\Dev"   # once; new terminals and Explorer pick it up
-.\lodestone.exe C:\Users\you\Dev         # or per launch
-```
+Unpack the archive and move `lodestone` into the folder that holds your
+apps: Lodestone scans only the folder it lives in (see [Usage](#usage)), so
+started from Downloads it finds nothing. Launching apps needs a Rust
+toolchain (`cargo`) on your `PATH`, because Lodestone builds each app from
+its source checkout before starting it; downloaded app binaries aren't
+discovered.
 
 ### From source
 
@@ -93,20 +86,18 @@ xcodebuild -downloadComponent MetalToolchain
 
 ## Usage
 
-Lodestone needs to know which folder holds your apps. It picks the first of
-these that applies:
+Lodestone shows only the Ferrite apps in the folder it lives in, one level
+deep:
 
-1. a folder passed on the command line: `lodestone ~/Dev`
-2. the `LODESTONE_ROOT` environment variable
-3. the parent folder of the Lodestone checkout, when you run it from source
-4. the current directory
+- run from source, that is the folder holding the `ferrite-lodestone` checkout
+- as a downloaded binary, that is the folder you put `lodestone` in
 
-Put Lodestone next to your apps, and `cargo run` finds them:
+So keep Lodestone next to your apps:
 
 ```
 Dev/
 ├── ferrite-design/      # its examples appear on the Gallery page
-├── ferrite-lodestone/   # this repo
+├── ferrite-lodestone/   # this repo (or just the lodestone binary)
 ├── ferrite-pulse/       # any crate that depends on ferrite-design
 └── ferrite-almanac/
 ```
