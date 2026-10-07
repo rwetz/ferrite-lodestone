@@ -1,0 +1,31 @@
+[package]
+name = "ferrite-lodestone"
+version = "0.1.0"
+description = "One window for every Ferrite app: launch them, watch them, share one look."
+authors = ["Ryan Wetzstein"]
+license = "Apache-2.0"
+repository = "https://github.com/rwetz/ferrite-lodestone"
+readme = "README.md"
+keywords = ["gpui", "ferrite", "launcher", "desktop", "gui"]
+categories = ["gui", "development-tools"]
+edition = "2024"
+rust-version = "1.88"
+
+[[bin]]
+name = "lodestone"
+path = "src/main.rs"
+
+[dependencies]
+ferrite-design = { git = "https://github.com/rwetz/ferrite-design", rev = "8129fdb50032cc6ec91c1c4ae9a86059870e3b26" }
+# Must match ferrite-design exactly (PITFALLS §1).
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8" }
+
+# gpui is sluggish unoptimised; optimise dependencies even in dev builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
