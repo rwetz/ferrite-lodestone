@@ -35,21 +35,25 @@ impl Entry {
     }
 }
 
-/// Where to look, first match wins: a folder given on the command line,
-/// `LODESTONE_ROOT`, the folder this crate was built in (when run from a
-/// checkout), else the current directory.
+/// The folder Lodestone lives in, and the only one it scans.
 pub fn default_root() -> PathBuf {
-    if let Some(arg) = std::env::args_os().nth(1) {
-        return PathBuf::from(arg);
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| root_for_exe(&exe))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Where the executable sits decides the folder: a cargo build
+/// (`…/Dev/ferrite-lodestone/target/debug/lodestone`) belongs to its
+/// checkout, so the checkout's folder (`…/Dev`) is scanned; a standalone
+/// binary (`…/Dev/lodestone`) scans the folder it was dropped in.
+pub fn root_for_exe(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    let crate_dir = dir.ancestors().find(|a| a.file_name().is_some_and(|n| n == "target")).and_then(Path::parent);
+    match crate_dir {
+        Some(checkout) => checkout.parent().map(Path::to_path_buf),
+        None => Some(dir.to_path_buf()),
     }
-    if let Some(root) = std::env::var_os("LODESTONE_ROOT") {
-        return PathBuf::from(root);
-    }
-    // A release binary was built elsewhere; only trust this path if it exists here.
-    if let Some(parent) = Path::new(env!("CARGO_MANIFEST_DIR")).parent().filter(|p| p.is_dir()) {
-        return parent.to_path_buf();
-    }
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 // ── Cargo.toml (pure) ─────────────────────────────────────────────────────
@@ -367,6 +371,14 @@ mod tests {
         assert_eq!(Shared::parse(&s.serialize()), s);
         let junk = Shared::parse("appearance = purple\nfps = 9000\ndensity = huge\n");
         assert_eq!(junk, Shared { fps: 240, ..Shared::default() });
+    }
+
+    #[test]
+    fn root_is_the_folder_lodestone_lives_in() {
+        let p = |s: &str| PathBuf::from(s);
+        assert_eq!(root_for_exe(&p("/home/a/Dev/ferrite-lodestone/target/debug/lodestone")), Some(p("/home/a/Dev")));
+        assert_eq!(root_for_exe(&p("/home/a/Dev/ferrite-lodestone/target/x86_64-pc-windows-msvc/release/lodestone.exe")), Some(p("/home/a/Dev")));
+        assert_eq!(root_for_exe(&p("/home/a/Dev/lodestone")), Some(p("/home/a/Dev")));
     }
 
     #[test]

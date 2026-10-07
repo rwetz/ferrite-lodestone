@@ -6,13 +6,18 @@ All notable changes to Lodestone are listed here. The format follows
 
 ## [0.1.1] - 2026-10-07
 
+### Changed
+
+- Lodestone scans only the folder it lives in: the folder holding the
+  checkout when run from source, or the binary's own folder. The
+  command-line folder, `LODESTONE_ROOT` and the current-directory fallback
+  are gone.
+
 ### Fixed
 
 - Windows: the executable, window and taskbar now show the Lodestone logo
   instead of the generic application icon, and Task Manager lists it as
   "Lodestone".
-- README: a downloaded Lodestone needs a folder (`LODESTONE_ROOT` or an
-  argument) to find apps, and apps are discovered from source checkouts.
 
 ## [0.1.0] - 2026-10-06
 

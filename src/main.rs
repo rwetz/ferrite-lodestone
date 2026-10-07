@@ -5,9 +5,8 @@
 //! keeps one shared look — scheme, appearance, refresh rate, density — that
 //! every app it starts inherits through the `FERRITE_*` variables.
 //!
-//!     cargo run                    # scans the folder this crate sits in
-//!     cargo run -- ~/Dev           # or any folder
-//!     LODESTONE_ROOT=~/Dev lodestone
+//!     cargo run      # scans the folder this checkout sits in
+//!     ./lodestone    # a standalone binary scans the folder it sits in
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
