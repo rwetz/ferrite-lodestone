@@ -4,6 +4,26 @@ All notable changes to Lodestone are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-10-07
+
+### Changed
+
+- Lodestone installs apps instead of building them. It lists the GitHub
+  repos tagged `ferrite-app`, downloads an app's release archive for this
+  platform, checks it against `SHA256SUMS.txt`, and unpacks it under
+  `<data>/ferrite/apps`. **Run** starts that binary at once; nothing is
+  compiled, and no Rust toolchain is needed.
+- A tile shows the version and the release's age (`v0.1.1 · 8 hours ago`)
+  instead of the last commit.
+- The Gallery page and folder scanning are gone; there is an Installed page.
+
+### Added
+
+- **Install** and **Update**, with a download progress bar.
+- An update badge when a newer release is out than the one installed.
+- The catalog is cached, so Lodestone opens with its apps offline.
+- `GITHUB_TOKEN` is used when set, for a higher API rate limit.
+
 ## [0.1.1] - 2026-10-07
 
 ### Changed
@@ -40,5 +60,6 @@ The first release.
 - The workspace folder comes from the command line, `LODESTONE_ROOT`, the
   checkout's parent folder, or the current directory, in that order.
 
+[0.2.0]: https://github.com/rwetz/ferrite-lodestone/releases/tag/v0.2.0
 [0.1.1]: https://github.com/rwetz/ferrite-lodestone/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rwetz/ferrite-lodestone/releases/tag/v0.1.0

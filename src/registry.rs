@@ -1,111 +1,80 @@
-//! What Lodestone knows about the workspace: which crates are Ferrite apps,
-//! how to build and start them, and the shared look every launch inherits.
+//! What Lodestone knows: which Ferrite apps exist (GitHub repos tagged
+//! `ferrite-app`), their latest releases, which are installed here, how to
+//! install and start them, and the shared look every launch inherits.
+//!
+//! Lodestone never compiles anything. An install downloads the release
+//! archive for this platform, checks it against the release's
+//! `SHA256SUMS.txt`, and unpacks it under the apps folder.
 //!
 //! Pure parsing is separated from I/O so it can be unit-tested.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use gpui::SharedString;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Kind {
-    /// A crate that depends on ferrite-design.
-    App,
-    /// An example inside ferrite-design itself (the gallery, the templates).
-    Example,
+/// Whose GitHub repos are searched for apps.
+pub const OWNER: &str = "rwetz";
+/// The topic that marks a repo as a Ferrite app.
+pub const TOPIC: &str = "ferrite-app";
+
+/// The release-archive target for this build of Lodestone.
+pub const TARGET: &str = if cfg!(windows) {
+    "x86_64-pc-windows-msvc"
+} else if cfg!(target_os = "macos") {
+    "aarch64-apple-darwin"
+} else {
+    "x86_64-unknown-linux-gnu"
+};
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Release {
+    /// `v0.1.1`.
+    pub tag: String,
+    /// Unix seconds.
+    pub published: i64,
+    /// The archive for [`TARGET`].
+    pub asset: String,
+    pub asset_url: String,
+    pub size: u64,
+    pub sums_url: Option<String>,
+    pub page: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct Entry {
-    /// Stable id: the package name, or `ferrite-design:<example>`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct App {
+    /// Stable id: the repo name, which is also the binary's name.
     pub key: SharedString,
     pub name: SharedString,
     pub about: SharedString,
-    pub dir: PathBuf,
-    pub kind: Kind,
-    /// The cargo target: the package's binary, or the example's name.
-    pub target: String,
+    /// The latest release with an archive for this platform, if any.
+    pub release: Option<Release>,
 }
 
-impl Entry {
+impl App {
     pub fn matches(&self, query: &str) -> bool {
         let q = query.trim().to_lowercase();
         q.is_empty() || self.name.to_lowercase().contains(&q) || self.about.to_lowercase().contains(&q)
     }
 }
 
-/// The folder Lodestone lives in, and the only one it scans.
-pub fn default_root() -> PathBuf {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| root_for_exe(&exe))
-        .unwrap_or_else(|| PathBuf::from("."))
+/// An app as it sits on disk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Installed {
+    pub tag: String,
+    pub exe: PathBuf,
 }
 
-/// Where the executable sits decides the folder: a cargo build
-/// (`…/Dev/ferrite-lodestone/target/debug/lodestone`) belongs to its
-/// checkout, so the checkout's folder (`…/Dev`) is scanned; a standalone
-/// binary (`…/Dev/lodestone`) scans the folder it was dropped in.
-pub fn root_for_exe(exe: &Path) -> Option<PathBuf> {
-    let dir = exe.parent()?;
-    let crate_dir = dir.ancestors().find(|a| a.file_name().is_some_and(|n| n == "target")).and_then(Path::parent);
-    match crate_dir {
-        Some(checkout) => checkout.parent().map(Path::to_path_buf),
-        None => Some(dir.to_path_buf()),
-    }
-}
-
-// ── Cargo.toml (pure) ─────────────────────────────────────────────────────
-
-#[derive(Default, Debug, PartialEq)]
-pub struct Manifest {
-    pub name: Option<String>,
-    pub description: Option<String>,
-    pub uses_ferrite: bool,
-}
-
-/// Just enough TOML for `[package] name/description` and a ferrite-design
-/// dependency; no need to pull in a parser for three keys.
-pub fn parse_manifest(src: &str) -> Manifest {
-    let mut m = Manifest::default();
-    let mut section = String::new();
-    for line in src.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            section = line.trim_matches(|c| c == '[' || c == ']').trim().to_string();
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else { continue };
-        let key = key.trim();
-        let value = value.trim().trim_matches('"').to_string();
-        match section.as_str() {
-            "package" if key == "name" => m.name = Some(value),
-            "package" if key == "description" => m.description = Some(value),
-            s if s.ends_with("dependencies") && key == "ferrite-design" => m.uses_ferrite = true,
-            _ => {}
-        }
-        if section.ends_with("dependencies.ferrite-design") {
-            m.uses_ferrite = true;
-        }
-    }
-    m
-}
-
-/// The first `//!` line of an example: its one-line summary.
-pub fn example_about(src: &str) -> String {
-    src.lines()
-        .filter_map(|l| l.trim().strip_prefix("//!"))
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("")
-        .to_string()
-}
-
-/// `app_dashboard` → `Dashboard`, `components` → `Components`.
-pub fn example_name(stem: &str) -> String {
-    let stem = stem.strip_prefix("app_").unwrap_or(stem);
-    stem.split('_')
+/// `ferrite-desk-clock` → `Desk Clock`.
+pub fn app_name(repo: &str) -> String {
+    repo.strip_prefix("ferrite-")
+        .unwrap_or(repo)
+        .split('-')
         .map(|w| {
             let mut c = w.chars();
             c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_default()
@@ -114,118 +83,288 @@ pub fn example_name(stem: &str) -> String {
         .join(" ")
 }
 
-/// `ferrite-pulse` → `Pulse`.
-pub fn app_name(package: &str) -> String {
-    example_name(&package.strip_prefix("ferrite-").unwrap_or(package).replace('-', "_"))
+// ── GitHub responses (pure) ───────────────────────────────────────────────
+
+/// `(name, description)` of every repo in a `/users/:owner/repos` page that
+/// carries [`TOPIC`] and isn't archived.
+pub fn parse_repos(body: &str) -> Result<Vec<(String, String)>, String> {
+    let v: Value = serde_json::from_str(body).map_err(|_| "GitHub sent something that isn't JSON".to_string())?;
+    let repos = v.as_array().ok_or("GitHub didn't send a list of repos")?;
+    Ok(repos
+        .iter()
+        .filter(|r| !r["archived"].as_bool().unwrap_or(false))
+        .filter(|r| r["topics"].as_array().is_some_and(|t| t.iter().any(|t| t == TOPIC)))
+        .filter_map(|r| Some((r["name"].as_str()?.to_string(), r["description"].as_str().unwrap_or("").to_string())))
+        .collect())
 }
 
-// ── Scanning (I/O) ────────────────────────────────────────────────────────
+/// A `/releases/latest` response, if it has an archive for `target`.
+pub fn parse_release(body: &str, target: &str) -> Option<Release> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    let assets = v["assets"].as_array()?;
+    let named = |pred: &dyn Fn(&str) -> bool| assets.iter().find(|a| a["name"].as_str().is_some_and(pred));
+    let archive = named(&|n| n.contains(target) && (n.ends_with(".zip") || n.ends_with(".tar.gz")))?;
+    Some(Release {
+        tag: v["tag_name"].as_str()?.to_string(),
+        published: v["published_at"].as_str().and_then(parse_time).unwrap_or(0),
+        asset: archive["name"].as_str()?.to_string(),
+        asset_url: archive["browser_download_url"].as_str()?.to_string(),
+        size: archive["size"].as_u64().unwrap_or(0),
+        sums_url: named(&|n| n == "SHA256SUMS.txt").and_then(|a| a["browser_download_url"].as_str()).map(str::to_string),
+        page: v["html_url"].as_str().unwrap_or("").to_string(),
+    })
+}
 
-/// Every Ferrite app under `root` (one level deep), then ferrite-design's
-/// examples. Lodestone itself is left out.
-pub fn scan(root: &Path) -> Vec<Entry> {
-    let mut apps = Vec::new();
-    let mut examples = Vec::new();
-    let Ok(dirs) = std::fs::read_dir(root) else { return apps };
-    for dir in dirs.flatten().map(|d| d.path()).filter(|p| p.is_dir()) {
-        let Ok(src) = std::fs::read_to_string(dir.join("Cargo.toml")) else { continue };
-        let m = parse_manifest(&src);
-        let Some(name) = m.name else { continue };
-        if name == "ferrite-design" {
-            examples = scan_examples(&dir);
-        } else if m.uses_ferrite && name != env!("CARGO_PKG_NAME") {
-            apps.push(Entry {
-                key: name.clone().into(),
-                name: app_name(&name).into(),
-                about: m.description.unwrap_or_default().into(),
-                dir,
-                kind: Kind::App,
-                target: name,
-            });
-        }
+/// The hash `SHA256SUMS.txt` lists for `file` (`<hex>  <name>` lines).
+pub fn sum_for(sums: &str, file: &str) -> Option<String> {
+    sums.lines().find_map(|l| {
+        let (hash, name) = l.split_once(char::is_whitespace)?;
+        (name.trim().trim_start_matches('*') == file).then(|| hash.to_lowercase())
+    })
+}
+
+/// `2026-10-07T13:26:11Z` → Unix seconds.
+pub fn parse_time(s: &str) -> Option<i64> {
+    let n = |r: std::ops::Range<usize>| s.get(r)?.parse::<i64>().ok();
+    let (y, mo, d, h, mi, se) = (n(0..4)?, n(5..7)?, n(8..10)?, n(11..13)?, n(14..16)?, n(17..19)?);
+    // Days from the civil date (Howard Hinnant's algorithm).
+    let y = if mo <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Some(days * 86_400 + h * 3600 + mi * 60 + se)
+}
+
+pub fn now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+/// `8 hours ago`, the way git says it.
+pub fn ago(secs: i64) -> String {
+    let unit = |n: i64, u: &str| format!("{n} {u}{} ago", if n == 1 { "" } else { "s" });
+    match secs.max(0) {
+        0..60 => "just now".into(),
+        s @ 60..3600 => unit(s / 60, "minute"),
+        s @ 3600..86_400 => unit(s / 3600, "hour"),
+        s @ 86_400..2_592_000 => unit(s / 86_400, "day"),
+        s @ 2_592_000..31_536_000 => unit(s / 2_592_000, "month"),
+        s => unit(s / 31_536_000, "year"),
     }
-    apps.sort_by(|a, b| a.name.cmp(&b.name));
-    apps.extend(examples);
-    apps
 }
 
-fn scan_examples(dir: &Path) -> Vec<Entry> {
-    let Ok(files) = std::fs::read_dir(dir.join("examples")) else { return Vec::new() };
-    let mut out: Vec<Entry> = files
-        .flatten()
-        .map(|f| f.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
-        .filter_map(|p| {
-            let stem = p.file_stem()?.to_str()?.to_string();
-            // The cheat sheet is a compile check, not something to look at.
-            if stem == "cheatsheet" {
-                return None;
-            }
-            let about = std::fs::read_to_string(&p).map(|s| example_about(&s)).unwrap_or_default();
-            Some(Entry {
-                key: format!("ferrite-design:{stem}").into(),
-                name: example_name(&stem).into(),
-                about: about.into(),
-                dir: dir.to_path_buf(),
-                kind: Kind::Example,
-                target: stem,
+/// Whether `latest` is a newer tag than `installed` (`v0.1.10` > `v0.1.9`).
+pub fn is_newer(latest: &str, installed: &str) -> bool {
+    let parse = |t: &str| t.trim_start_matches('v').split('.').map(|p| p.parse::<u64>().ok()).collect::<Option<Vec<_>>>();
+    match (parse(latest), parse(installed)) {
+        (Some(l), Some(i)) => l > i,
+        _ => latest != installed,
+    }
+}
+
+/// `5.2 MB`.
+pub fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_000_000.)
+}
+
+// ── GitHub (I/O) ──────────────────────────────────────────────────────────
+
+fn get(url: &str) -> Result<ureq::Body, String> {
+    let mut req = ureq::get(url).header("User-Agent", "ferrite-lodestone").header("Accept", "application/vnd.github+json");
+    // Optional: lifts the 60-requests-an-hour limit for anonymous calls.
+    if let Some(token) = std::env::var("GITHUB_TOKEN").ok().filter(|t| !t.is_empty()) {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+    let resp = req.call().map_err(|e| match e {
+        ureq::Error::StatusCode(403 | 429) => "GitHub's rate limit is used up; try again in a while".to_string(),
+        ureq::Error::StatusCode(code) => format!("GitHub returned HTTP {code}"),
+        _ => "couldn't reach GitHub".to_string(),
+    })?;
+    Ok(resp.into_body())
+}
+
+fn get_text(url: &str) -> Result<String, String> {
+    get(url)?.read_to_string().map_err(|_| "couldn't read GitHub's response".to_string())
+}
+
+/// Every app on GitHub with its latest release (blocking; run it off the
+/// main thread). A repo without a release yet is still listed.
+pub fn fetch_catalog() -> Result<Vec<App>, String> {
+    let repos = parse_repos(&get_text(&format!("https://api.github.com/users/{OWNER}/repos?per_page=100&type=owner"))?)?;
+    let mut apps: Vec<App> = repos
+        .into_iter()
+        .map(|(repo, about)| {
+            let release = get_text(&format!("https://api.github.com/repos/{OWNER}/{repo}/releases/latest"))
+                .ok()
+                .and_then(|body| parse_release(&body, TARGET));
+            App { name: app_name(&repo).into(), key: repo.into(), about: about.into(), release }
+        })
+        .collect();
+    apps.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(apps)
+}
+
+// ── On disk ───────────────────────────────────────────────────────────────
+
+/// `<data>/ferrite`: `%LOCALAPPDATA%` on Windows.
+fn data_dir() -> Option<PathBuf> {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    } else if cfg!(target_os = "macos") {
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
+    } else {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+    };
+    base.map(|b| b.join("ferrite"))
+}
+
+/// Where installed apps live: `<data>/ferrite/apps/<repo>/<tag>/…`.
+pub fn apps_dir() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("apps"))
+}
+
+fn catalog_path() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("catalog.json"))
+}
+
+/// The last catalog fetched, so Lodestone opens with its apps offline.
+pub fn load_catalog() -> Vec<App> {
+    let Some(src) = catalog_path().and_then(|p| std::fs::read_to_string(p).ok()) else { return Vec::new() };
+    let Ok(Value::Array(apps)) = serde_json::from_str::<Value>(&src) else { return Vec::new() };
+    apps.iter()
+        .filter_map(|a| {
+            let s = |v: &Value| v.as_str().map(str::to_string);
+            let r = &a["release"];
+            Some(App {
+                key: s(&a["key"])?.into(),
+                name: s(&a["name"])?.into(),
+                about: s(&a["about"]).unwrap_or_default().into(),
+                release: r.is_object().then(|| {
+                    Some(Release {
+                        tag: s(&r["tag"])?,
+                        published: r["published"].as_i64().unwrap_or(0),
+                        asset: s(&r["asset"])?,
+                        asset_url: s(&r["asset_url"])?,
+                        size: r["size"].as_u64().unwrap_or(0),
+                        sums_url: s(&r["sums_url"]),
+                        page: s(&r["page"]).unwrap_or_default(),
+                    })
+                })?,
+            })
+        })
+        .collect()
+}
+
+pub fn save_catalog(apps: &[App]) {
+    let Some(path) = catalog_path() else { return };
+    let v: Vec<Value> = apps
+        .iter()
+        .map(|a| {
+            json!({
+                "key": a.key.as_ref(), "name": a.name.as_ref(), "about": a.about.as_ref(),
+                "release": a.release.as_ref().map(|r| json!({
+                    "tag": r.tag, "published": r.published, "asset": r.asset, "asset_url": r.asset_url,
+                    "size": r.size, "sums_url": r.sums_url, "page": r.page,
+                })),
             })
         })
         .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
-}
-
-/// `2 days ago · Add the thing`, or `None` outside git.
-pub fn last_commit(dir: &Path) -> Option<String> {
-    let out = quiet(Command::new("git").args(["log", "-1", "--format=%cr · %s"]).current_dir(dir)).output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && !s.is_empty()).then_some(s)
-}
-
-// ── Build and start ───────────────────────────────────────────────────────
-
-fn target_dir(dir: &Path) -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| dir.join("target"))
-}
-
-pub fn binary(e: &Entry) -> PathBuf {
-    let exe = format!("{}{}", e.target, std::env::consts::EXE_SUFFIX);
-    match e.kind {
-        Kind::App => target_dir(&e.dir).join("debug").join(exe),
-        Kind::Example => target_dir(&e.dir).join("debug").join("examples").join(exe),
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
+    let _ = std::fs::write(path, serde_json::to_string_pretty(&v).unwrap_or_default());
 }
 
-/// Build the entry (blocking; run it off the main thread). Builds first and
-/// then starts the binary directly, so Lodestone holds the app's own process
-/// rather than cargo's, and Stop really stops it.
-pub fn build(e: &Entry) -> Result<PathBuf, String> {
-    let mut cmd = Command::new("cargo");
-    cmd.arg("build").arg("--quiet").current_dir(&e.dir);
-    if e.kind == Kind::Example {
-        cmd.args(["--example", &e.target]);
+/// The `installed` marker: the tag, then the binary's path inside the app's folder.
+pub fn installed(key: &str) -> Option<Installed> {
+    let dir = apps_dir()?.join(key);
+    let src = std::fs::read_to_string(dir.join("installed")).ok()?;
+    let mut lines = src.lines();
+    let (tag, rel) = (lines.next()?.trim().to_string(), lines.next()?.trim());
+    let exe = dir.join(rel);
+    exe.exists().then_some(Installed { tag, exe })
+}
+
+/// `<name>` or `<name>.exe`, up to two folders down (the archive's own folder).
+fn find_exe(dir: &Path, name: &str, depth: u8) -> Option<PathBuf> {
+    let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    let entries: Vec<PathBuf> = std::fs::read_dir(dir).ok()?.flatten().map(|e| e.path()).collect();
+    entries.iter().find(|p| p.is_file() && p.file_name().is_some_and(|n| n == file.as_str())).cloned().or_else(|| {
+        (depth > 0).then(|| entries.iter().filter(|p| p.is_dir()).find_map(|p| find_exe(p, name, depth - 1))).flatten()
+    })
+}
+
+/// Download, verify and unpack `app`'s latest release (blocking; run it off
+/// the main thread). `done` counts the archive's bytes as they arrive. The
+/// previous version's folder is removed afterwards when it isn't in use.
+pub fn install(app: &App, done: &AtomicU64) -> Result<Installed, String> {
+    let r = app.release.as_ref().ok_or("no release for this platform yet")?;
+    let root = apps_dir().ok_or("no data directory")?.join(app.key.as_ref());
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+
+    let expected = match &r.sums_url {
+        Some(url) => Some(sum_for(&get_text(url)?, &r.asset).ok_or("the release's SHA256SUMS.txt doesn't list this archive")?),
+        None => None,
+    };
+
+    let archive = root.join(&r.asset);
+    let mut body = get(&r.asset_url)?;
+    let mut reader = body.as_reader();
+    let mut file = std::fs::File::create(&archive).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut buf).map_err(|_| "the download was cut off".to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+        done.fetch_add(n as u64, Ordering::Relaxed);
     }
-    let out = quiet(&mut cmd).output().map_err(|err| format!("cargo: {err}"))?;
+    drop(file);
+    let got = format!("{:x}", hasher.finalize());
+    if expected.as_ref().is_some_and(|e| *e != got) {
+        let _ = std::fs::remove_file(&archive);
+        return Err("the download doesn't match the release's checksum".into());
+    }
+
+    let dest = root.join(&r.tag);
+    let _ = std::fs::remove_dir_all(&dest);
+    std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+    // bsdtar ships with Windows 10+ and reads .zip; macOS and Linux have tar.
+    let tar = if cfg!(windows) { PathBuf::from(std::env::var_os("SystemRoot").unwrap_or("C:\\Windows".into())).join("System32\\tar.exe") } else { "tar".into() };
+    let out = quiet(Command::new(tar).arg("-xf").arg(&archive).arg("-C").arg(&dest)).output().map_err(|e| format!("tar: {e}"))?;
+    let _ = std::fs::remove_file(&archive);
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let tail: Vec<&str> = err.lines().filter(|l| !l.trim().is_empty()).collect();
-        return Err(tail.iter().rev().take(3).rev().copied().collect::<Vec<_>>().join("\n"));
+        return Err(format!("couldn't unpack: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
-    let bin = binary(e);
-    if bin.exists() { Ok(bin) } else { Err(format!("built, but {} is missing", bin.display())) }
+    let exe = find_exe(&dest, &app.key, 2).ok_or("the archive has no app in it")?;
+    let rel = exe.strip_prefix(&root).map_err(|e| e.to_string())?;
+    std::fs::write(root.join("installed"), format!("{}\n{}\n", r.tag, rel.display())).map_err(|e| e.to_string())?;
+
+    // Older versions go; one still running is left for the next install.
+    for old in std::fs::read_dir(&root).into_iter().flatten().flatten().map(|e| e.path()) {
+        if old.is_dir() && old != dest {
+            let _ = std::fs::remove_dir_all(old);
+        }
+    }
+    Ok(Installed { tag: r.tag.clone(), exe })
 }
 
-pub fn start(bin: &Path, dir: &Path, shared: &Shared) -> Result<Child, String> {
-    quiet(Command::new(bin).current_dir(dir).envs(shared.env()))
+pub fn start(exe: &Path, shared: &Shared) -> Result<Child, String> {
+    quiet(Command::new(exe).current_dir(exe.parent().unwrap_or(Path::new("."))).envs(shared.env()))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|err| format!("{}: {err}", bin.display()))
+        .map_err(|err| format!("{}: {err}", exe.display()))
 }
 
-pub fn reveal(dir: &Path) {
+/// Open a folder or a URL with the system's handler.
+pub fn open(target: &std::ffi::OsStr) {
     let opener = if cfg!(windows) {
         "explorer"
     } else if cfg!(target_os = "macos") {
@@ -233,7 +372,7 @@ pub fn reveal(dir: &Path) {
     } else {
         "xdg-open"
     };
-    let _ = Command::new(opener).arg(dir).spawn();
+    let _ = Command::new(opener).arg(target).spawn();
 }
 
 /// No console window flashing up on Windows for every child.
@@ -332,37 +471,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_finds_name_description_and_dependency() {
-        let m = parse_manifest(
-            "[package]\nname = \"ferrite-pulse\"\ndescription = \"Watch things\"\n\n[dependencies]\nferrite-design = { git = \"x\" }\ngpui = \"1\"\n",
-        );
-        assert_eq!(m, Manifest { name: Some("ferrite-pulse".into()), description: Some("Watch things".into()), uses_ferrite: true });
-    }
-
-    #[test]
-    fn manifest_ignores_names_outside_package() {
-        let m = parse_manifest("[[bin]]\nname = \"other\"\n[package]\nname = \"plain\"\n[dependencies]\nserde = \"1\"\n");
-        assert_eq!(m.name.as_deref(), Some("plain"));
-        assert!(!m.uses_ferrite);
-    }
-
-    #[test]
-    fn manifest_sees_table_style_dependency() {
-        assert!(parse_manifest("[package]\nname = \"a\"\n[dependencies.ferrite-design]\npath = \"../x\"\n").uses_ferrite);
-    }
-
-    #[test]
     fn names_read_well() {
-        assert_eq!(example_name("app_dashboard"), "Dashboard");
-        assert_eq!(example_name("components"), "Components");
         assert_eq!(app_name("ferrite-desk-clock"), "Desk Clock");
+        assert_eq!(app_name("ferrite-almanac"), "Almanac");
         assert_eq!(app_name("logscope"), "Logscope");
     }
 
     #[test]
-    fn example_about_is_first_doc_line() {
-        assert_eq!(example_about("//!\n//! Template: a monitoring dashboard.\n//! More.\nfn main() {}"), "Template: a monitoring dashboard.");
-        assert_eq!(example_about("fn main() {}"), "");
+    fn repos_need_the_topic_and_not_archived() {
+        let body = r#"[
+            {"name": "ferrite-almanac", "description": "A clock", "topics": ["ferrite-app"], "archived": false},
+            {"name": "ferrite-design", "description": "Design", "topics": ["gpui"]},
+            {"name": "ferrite-old", "description": null, "topics": ["ferrite-app"], "archived": true},
+            {"name": "ferrite-bare", "description": null, "topics": ["ferrite-app"]}
+        ]"#;
+        assert_eq!(parse_repos(body).unwrap(), vec![("ferrite-almanac".into(), "A clock".into()), ("ferrite-bare".into(), String::new())]);
+        assert!(parse_repos("{\"message\": \"Not Found\"}").is_err());
+    }
+
+    #[test]
+    fn release_picks_this_platforms_archive() {
+        let body = r#"{"tag_name": "v0.1.1", "published_at": "2026-10-07T13:26:11Z", "html_url": "https://x/r",
+            "assets": [
+                {"name": "ferrite-a-v0.1.1-aarch64-apple-darwin.tar.gz", "size": 1, "browser_download_url": "https://x/mac"},
+                {"name": "ferrite-a-v0.1.1-x86_64-pc-windows-msvc.zip", "size": 5204517, "browser_download_url": "https://x/win"},
+                {"name": "SHA256SUMS.txt", "size": 9, "browser_download_url": "https://x/sums"}
+            ]}"#;
+        let r = parse_release(body, "x86_64-pc-windows-msvc").unwrap();
+        assert_eq!((r.tag.as_str(), r.asset_url.as_str(), r.size), ("v0.1.1", "https://x/win", 5204517));
+        assert_eq!(r.sums_url.as_deref(), Some("https://x/sums"));
+        assert_eq!(r.published, 1_791_379_571);
+        assert!(parse_release(body, "riscv64gc-unknown-linux-gnu").is_none());
+    }
+
+    #[test]
+    fn sums_find_the_file() {
+        let sums = "ABC123  ferrite-a-v0.1.1-x86_64-pc-windows-msvc.zip\ndef456 *ferrite-a-v0.1.1-aarch64-apple-darwin.tar.gz\n";
+        assert_eq!(sum_for(sums, "ferrite-a-v0.1.1-x86_64-pc-windows-msvc.zip").as_deref(), Some("abc123"));
+        assert_eq!(sum_for(sums, "ferrite-a-v0.1.1-aarch64-apple-darwin.tar.gz").as_deref(), Some("def456"));
+        assert_eq!(sum_for(sums, "other.zip"), None);
+    }
+
+    #[test]
+    fn times_and_ages() {
+        assert_eq!(parse_time("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(parse_time("2000-03-01T00:00:00Z"), Some(951_868_800));
+        assert_eq!(parse_time("garbage"), None);
+        assert_eq!(ago(5), "just now");
+        assert_eq!(ago(60), "1 minute ago");
+        assert_eq!(ago(8 * 3600 + 59), "8 hours ago");
+        assert_eq!(ago(86_400), "1 day ago");
+        assert_eq!(ago(-30), "just now");
+    }
+
+    #[test]
+    fn newer_compares_numbers_not_text() {
+        assert!(is_newer("v0.1.10", "v0.1.9"));
+        assert!(is_newer("v0.2.0", "v0.1.1"));
+        assert!(!is_newer("v0.1.1", "v0.1.1"));
+        assert!(!is_newer("v0.1.0", "v0.1.1"));
     }
 
     #[test]
@@ -374,16 +541,8 @@ mod tests {
     }
 
     #[test]
-    fn root_is_the_folder_lodestone_lives_in() {
-        let p = |s: &str| PathBuf::from(s);
-        assert_eq!(root_for_exe(&p("/home/a/Dev/ferrite-lodestone/target/debug/lodestone")), Some(p("/home/a/Dev")));
-        assert_eq!(root_for_exe(&p("/home/a/Dev/ferrite-lodestone/target/x86_64-pc-windows-msvc/release/lodestone.exe")), Some(p("/home/a/Dev")));
-        assert_eq!(root_for_exe(&p("/home/a/Dev/lodestone")), Some(p("/home/a/Dev")));
-    }
-
-    #[test]
     fn search_matches_name_or_about() {
-        let e = Entry { key: "k".into(), name: "Dashboard".into(), about: "monitoring".into(), dir: ".".into(), kind: Kind::Example, target: "x".into() };
-        assert!(e.matches("dash") && e.matches("MONITOR") && e.matches("  ") && !e.matches("wizard"));
+        let a = App { key: "k".into(), name: "Barometer".into(), about: "weather station".into(), release: None };
+        assert!(a.matches("baro") && a.matches("WEATHER") && a.matches("  ") && !a.matches("radio"));
     }
 }
