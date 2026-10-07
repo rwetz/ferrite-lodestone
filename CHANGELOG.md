@@ -4,6 +4,15 @@ All notable changes to Lodestone are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Lodestone scans only the folder it lives in: the folder holding the
+  checkout when run from source, or the binary's own folder. The
+  command-line folder, `LODESTONE_ROOT` and the current-directory fallback
+  are gone.
+
 ## [0.1.0] - 2026-10-06
 
 The first release.

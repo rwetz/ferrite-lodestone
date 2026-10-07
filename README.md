@@ -83,20 +83,18 @@ xcodebuild -downloadComponent MetalToolchain
 
 ## Usage
 
-Lodestone needs to know which folder holds your apps. It picks the first of
-these that applies:
+Lodestone shows only the Ferrite apps in the folder it lives in, one level
+deep:
 
-1. a folder passed on the command line: `lodestone ~/Dev`
-2. the `LODESTONE_ROOT` environment variable
-3. the parent folder of the Lodestone checkout, when you run it from source
-4. the current directory
+- run from source, that is the folder holding the `ferrite-lodestone` checkout
+- as a downloaded binary, that is the folder you put `lodestone` in
 
-Put Lodestone next to your apps, and `cargo run` finds them:
+So keep Lodestone next to your apps:
 
 ```
 Dev/
 ├── ferrite-design/      # its examples appear on the Gallery page
-├── ferrite-lodestone/   # this repo
+├── ferrite-lodestone/   # this repo (or just the lodestone binary)
 ├── ferrite-pulse/       # any crate that depends on ferrite-design
 └── ferrite-desk-clock/
 ```
