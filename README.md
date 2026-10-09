@@ -36,7 +36,14 @@ It's a native desktop app built with [GPUI](https://gpui.rs) and
 - **Install and update.** **Install** downloads the release archive for
   your platform, checks it against the release's `SHA256SUMS.txt`, and
   unpacks it. A progress bar shows the download. When a newer release is
-  out, the tile says so and offers **Update**.
+  out, the tile says so and offers **Update**; **Update all** in the
+  toolbar updates every app that has one (a running app waits until you
+  stop it).
+- **Updates itself.** Each check also looks at Lodestone's own releases.
+  When a newer one is out, a banner offers **Update Lodestone**: it
+  downloads and verifies the release the same way, swaps the new binary in
+  where the running one is, and **Restart now** opens it. Apps you started
+  keep running.
 - **Live tiles.** Each tile shows the app's version and how long ago it
   was released (`v0.1.1 · 8 hours ago`), and its state: not installed,
   installed, update, installing, running, stopped, exited or failed. While
@@ -99,6 +106,12 @@ Installed apps live in one folder per app, with the current version inside:
 
 An update unpacks the new version next to the old one and removes the old
 one afterwards (or at the next update, if it was still running).
+
+Lodestone updates itself in place: the running binary is renamed to
+`lodestone.old` (Windows lets a running program be renamed, not
+overwritten), the new one takes its name, and the next start deletes
+`lodestone.old`. It needs write access to its own folder; if it doesn't
+have that, the banner says so and links the release to download by hand.
 
 GitHub allows 60 anonymous API requests an hour, and a check costs one plus
 one per app. Set `GITHUB_TOKEN` to raise that limit.

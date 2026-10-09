@@ -22,6 +22,10 @@ use sha2::{Digest, Sha256};
 pub const OWNER: &str = "rwetz";
 /// The topic that marks a repo as a Ferrite app.
 pub const TOPIC: &str = "ferrite-app";
+/// Lodestone's own repo: it updates itself from these releases.
+pub const SELF_REPO: &str = "ferrite-lodestone";
+/// This build's version, as its release is tagged.
+pub const VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
 
 /// The release-archive target for this build of Lodestone.
 pub const TARGET: &str = if cfg!(windows) {
@@ -197,11 +201,46 @@ pub fn fetch_catalog() -> Result<Vec<App>, String> {
             let release = get_text(&format!("https://api.github.com/repos/{OWNER}/{repo}/releases/latest"))
                 .ok()
                 .and_then(|body| parse_release(&body, TARGET));
+            fetch_icon(&repo);
             App { name: app_name(&repo).into(), key: repo.into(), about: about.into(), release }
         })
         .collect();
     apps.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(apps)
+}
+
+/// Where every Ferrite app keeps its logo.
+const ICON: &str = "assets/logo.svg";
+
+/// Cache `repo`'s logo for [`icon`]. An app without one keeps its
+/// identicon; a failed fetch keeps the last copy.
+fn fetch_icon(repo: &str) {
+    let Some(path) = icons_dir().map(|d| d.join(format!("{repo}.svg"))) else { return };
+    let Ok(svg) = get_text(&format!("https://raw.githubusercontent.com/{OWNER}/{repo}/HEAD/{ICON}")) else { return };
+    if !is_svg(&svg) || std::fs::read_to_string(&path).is_ok_and(|old| old == svg) {
+        return;
+    }
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, svg);
+}
+
+/// Whether a download is an SVG and not, say, an error page.
+pub fn is_svg(body: &str) -> bool {
+    let head = body.trim_start();
+    (head.starts_with("<svg") || head.starts_with("<?xml")) && body.contains("</svg>")
+}
+
+/// `key`'s cached logo, if Lodestone has fetched one.
+pub fn icon(key: &str) -> Option<PathBuf> {
+    icons_dir().map(|d| d.join(format!("{key}.svg"))).filter(|p| p.exists())
+}
+
+/// Lodestone's latest release, when it's newer than this build (blocking).
+pub fn fetch_self() -> Result<Option<Release>, String> {
+    let body = get_text(&format!("https://api.github.com/repos/{OWNER}/{SELF_REPO}/releases/latest"))?;
+    Ok(parse_release(&body, TARGET).filter(|r| is_newer(&r.tag, VERSION)))
 }
 
 // ── On disk ───────────────────────────────────────────────────────────────
@@ -223,6 +262,10 @@ fn data_dir() -> Option<PathBuf> {
 /// Where installed apps live: `<data>/ferrite/apps/<repo>/<tag>/…`.
 pub fn apps_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("apps"))
+}
+
+fn icons_dir() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("icons"))
 }
 
 fn catalog_path() -> Option<PathBuf> {
@@ -296,14 +339,10 @@ fn find_exe(dir: &Path, name: &str, depth: u8) -> Option<PathBuf> {
     })
 }
 
-/// Download, verify and unpack `app`'s latest release (blocking; run it off
-/// the main thread). `done` counts the archive's bytes as they arrive. The
-/// previous version's folder is removed afterwards when it isn't in use.
-pub fn install(app: &App, done: &AtomicU64) -> Result<Installed, String> {
-    let r = app.release.as_ref().ok_or("no release for this platform yet")?;
-    let root = apps_dir().ok_or("no data directory")?.join(app.key.as_ref());
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
-
+/// Download `r`'s archive into `root`, check it against the release's
+/// `SHA256SUMS.txt`, and unpack it into `dest` (emptied first). `done`
+/// counts the archive's bytes as they arrive.
+fn download(r: &Release, root: &Path, dest: &Path, done: &AtomicU64) -> Result<(), String> {
     let expected = match &r.sums_url {
         Some(url) => Some(sum_for(&get_text(url)?, &r.asset).ok_or("the release's SHA256SUMS.txt doesn't list this archive")?),
         None => None,
@@ -331,16 +370,27 @@ pub fn install(app: &App, done: &AtomicU64) -> Result<Installed, String> {
         return Err("the download doesn't match the release's checksum".into());
     }
 
-    let dest = root.join(&r.tag);
-    let _ = std::fs::remove_dir_all(&dest);
-    std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(dest);
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     // bsdtar ships with Windows 10+ and reads .zip; macOS and Linux have tar.
     let tar = if cfg!(windows) { PathBuf::from(std::env::var_os("SystemRoot").unwrap_or("C:\\Windows".into())).join("System32\\tar.exe") } else { "tar".into() };
-    let out = quiet(Command::new(tar).arg("-xf").arg(&archive).arg("-C").arg(&dest)).output().map_err(|e| format!("tar: {e}"))?;
+    let out = quiet(Command::new(tar).arg("-xf").arg(&archive).arg("-C").arg(dest)).output().map_err(|e| format!("tar: {e}"))?;
     let _ = std::fs::remove_file(&archive);
     if !out.status.success() {
         return Err(format!("couldn't unpack: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
+    Ok(())
+}
+
+/// Download, verify and unpack `app`'s latest release (blocking; run it off
+/// the main thread). The previous version's folder is removed afterwards
+/// when it isn't in use.
+pub fn install(app: &App, done: &AtomicU64) -> Result<Installed, String> {
+    let r = app.release.as_ref().ok_or("no release for this platform yet")?;
+    let root = apps_dir().ok_or("no data directory")?.join(app.key.as_ref());
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let dest = root.join(&r.tag);
+    download(r, &root, &dest, done)?;
     let exe = find_exe(&dest, &app.key, 2).ok_or("the archive has no app in it")?;
     let rel = exe.strip_prefix(&root).map_err(|e| e.to_string())?;
     std::fs::write(root.join("installed"), format!("{}\n{}\n", r.tag, rel.display())).map_err(|e| e.to_string())?;
@@ -352,6 +402,42 @@ pub fn install(app: &App, done: &AtomicU64) -> Result<Installed, String> {
         }
     }
     Ok(Installed { tag: r.tag.clone(), exe })
+}
+
+/// Where the replaced Lodestone waits until the next start removes it.
+fn set_aside(exe: &Path) -> PathBuf {
+    exe.with_extension("old")
+}
+
+/// Put release `r` of Lodestone where the running binary is (blocking).
+/// The running binary can't be overwritten on Windows but can be renamed,
+/// so it moves aside first; the next start deletes it. Returns the path to
+/// start the new version from.
+pub fn update_self(r: &Release, done: &AtomicU64) -> Result<PathBuf, String> {
+    let current = std::env::current_exe().map_err(|e| e.to_string())?;
+    let root = data_dir().ok_or("no data directory")?.join("self-update");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    let dest = root.join(&r.tag);
+    download(r, &root, &dest, done)?;
+    let fresh = find_exe(&dest, "lodestone", 2).ok_or("the archive has no Lodestone in it")?;
+
+    let aside = set_aside(&current);
+    let _ = std::fs::remove_file(&aside);
+    std::fs::rename(&current, &aside).map_err(|e| format!("couldn't move the running Lodestone aside: {e}"))?;
+    if let Err(e) = std::fs::copy(&fresh, &current) {
+        let _ = std::fs::rename(&aside, &current);
+        return Err(format!("couldn't put the new Lodestone in place: {e}"));
+    }
+    let _ = std::fs::remove_dir_all(&root);
+    Ok(current)
+}
+
+/// Delete the binary a self-update set aside, now that it isn't running.
+pub fn clear_set_aside() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(set_aside(&exe));
+    }
 }
 
 pub fn start(exe: &Path, shared: &Shared) -> Result<Child, String> {
@@ -522,6 +608,14 @@ mod tests {
         assert_eq!(ago(8 * 3600 + 59), "8 hours ago");
         assert_eq!(ago(86_400), "1 day ago");
         assert_eq!(ago(-30), "just now");
+    }
+
+    #[test]
+    fn icons_must_be_svg() {
+        assert!(is_svg("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>\n"));
+        assert!(is_svg("<?xml version=\"1.0\"?>\n<svg></svg>"));
+        assert!(!is_svg("404: Not Found"));
+        assert!(!is_svg("<html><body>sign in</body></html>"));
     }
 
     #[test]

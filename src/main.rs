@@ -13,6 +13,7 @@
 mod registry;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Child;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,6 +42,17 @@ enum Run {
     Failed(String),
 }
 
+/// Lodestone's own update.
+enum Me {
+    /// Up to date, as far as the last check knows.
+    Current,
+    Out(registry::Release),
+    Updating { release: registry::Release, done: Arc<AtomicU64> },
+    /// The new binary is in place; a restart runs it.
+    Ready { tag: String, exe: PathBuf },
+    Failed { release: registry::Release, err: String },
+}
+
 /// The last check with GitHub.
 enum Sync {
     Checking,
@@ -51,8 +63,11 @@ enum Sync {
 struct Lodestone {
     apps: Vec<registry::App>,
     installed: HashMap<SharedString, Installed>,
+    /// Cached logos, by app.
+    icons: HashMap<SharedString, PathBuf>,
     runs: HashMap<SharedString, Run>,
     sync: Sync,
+    me: Me,
     nav: SharedString,
     selected: Option<SharedString>,
     drawer: bool,
@@ -88,8 +103,10 @@ impl Lodestone {
             // The last catalog opens at once (and offline); a fresh one follows.
             apps: registry::load_catalog(),
             installed: HashMap::new(),
+            icons: HashMap::new(),
             runs: HashMap::new(),
             sync: Sync::Checking,
+            me: Me::Current,
             nav: "apps".into(),
             selected: None,
             drawer: false,
@@ -119,8 +136,16 @@ impl Lodestone {
         self.scans += 1;
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let fetched = cx.background_executor().spawn(async move { registry::fetch_catalog() }).await;
+            let (fetched, me) = cx.background_executor().spawn(async move { (registry::fetch_catalog(), registry::fetch_self()) }).await;
             let _ = this.update(cx, |this, cx| {
+                // An update under way, or done, isn't undone by a check.
+                if matches!(this.me, Me::Current | Me::Out(_) | Me::Failed { .. }) {
+                    match me {
+                        Ok(Some(release)) => this.me = Me::Out(release),
+                        Ok(None) => this.me = Me::Current,
+                        Err(_) => {}
+                    }
+                }
                 match fetched {
                     Ok(apps) => {
                         registry::save_catalog(&apps);
@@ -144,6 +169,7 @@ impl Lodestone {
 
     fn refresh_installed(&mut self) {
         self.installed = self.apps.iter().filter_map(|a| Some((a.key.clone(), registry::installed(&a.key)?))).collect();
+        self.icons = self.apps.iter().filter_map(|a| Some((a.key.clone(), registry::icon(&a.key)?))).collect();
     }
 
     fn app(&self, key: &SharedString) -> Option<&registry::App> {
@@ -215,6 +241,64 @@ impl Lodestone {
         .detach();
     }
 
+    /// Every installed app with a newer release, not already installing.
+    fn updates(&self) -> Vec<SharedString> {
+        self.apps
+            .iter()
+            .filter(|a| self.update_for(&a.key).is_some() && !matches!(self.runs.get(&a.key), Some(Run::Installing { .. })))
+            .map(|a| a.key.clone())
+            .collect()
+    }
+
+    /// Update every app that has one; a running app is left until it's stopped.
+    fn update_all(&mut self, cx: &mut Context<Self>) {
+        let (running, idle): (Vec<_>, Vec<_>) = self.updates().into_iter().partition(|k| self.is_running(k));
+        for key in idle {
+            self.install(key, cx);
+        }
+        if !running.is_empty() {
+            let names: Vec<String> = running.iter().filter_map(|k| self.app(k)).map(|a| a.name.to_string()).collect();
+            let note = toast(format!("{} still running", names.join(", "))).warning().message("Stop it, then update.");
+            self.toaster.update(cx, |t, cx| t.push(note, cx));
+        }
+    }
+
+    // ── Updating Lodestone ───────────────────────────────────────────────
+
+    fn update_self(&mut self, cx: &mut Context<Self>) {
+        let release = match &self.me {
+            Me::Out(r) | Me::Failed { release: r, .. } => r.clone(),
+            _ => return,
+        };
+        let done = Arc::new(AtomicU64::new(0));
+        self.me = Me::Updating { release: release.clone(), done: done.clone() };
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let job = release.clone();
+            let result = cx.background_executor().spawn(async move { registry::update_self(&job, &done) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.me = match result {
+                    Ok(exe) => Me::Ready { tag: release.tag, exe },
+                    Err(err) => Me::Failed { release, err },
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Start the new Lodestone and close this one. Apps it started keep running.
+    fn restart(&mut self, cx: &mut Context<Self>) {
+        let Me::Ready { exe, .. } = &self.me else { return };
+        match std::process::Command::new(exe).spawn() {
+            Ok(_) => cx.quit(),
+            Err(err) => {
+                let note = toast("Couldn't restart Lodestone").danger().message(format!("{err}. Start it again yourself."));
+                self.toaster.update(cx, |t, cx| t.push(note, cx));
+            }
+        }
+    }
+
     fn launch(&mut self, key: SharedString, cx: &mut Context<Self>) {
         if self.is_busy(&key) {
             return;
@@ -252,7 +336,7 @@ impl Lodestone {
 
     fn poll(&mut self, cx: &mut Context<Self>) {
         self.ticks = self.ticks.wrapping_add(1);
-        let mut changed = false;
+        let mut changed = matches!(self.me, Me::Updating { .. });
         for run in self.runs.values_mut() {
             match run {
                 Run::Installing { .. } => changed = true,
@@ -329,6 +413,18 @@ impl Lodestone {
                     let _ = weak.update(cx, |this, cx| this.sync(cx));
                 }
             }),
+            command("Update all apps").group("Lodestone").icon(Icon::Down).on_run({
+                let weak = weak.clone();
+                move |_, cx| {
+                    let _ = weak.update(cx, |this, cx| this.update_all(cx));
+                }
+            }),
+            command("Update Lodestone").group("Lodestone").icon(Icon::Down).on_run({
+                let weak = weak.clone();
+                move |_, cx| {
+                    let _ = weak.update(cx, |this, cx| this.update_self(cx));
+                }
+            }),
             command("Stop all apps").group("Lodestone").icon(Icon::Stop).on_run({
                 let weak = weak.clone();
                 move |_, cx| {
@@ -354,8 +450,7 @@ impl Lodestone {
 
     // ── Views ────────────────────────────────────────────────────────────
 
-    fn status(&self, a: &registry::App, window: &mut Window, cx: &App) -> AnyElement {
-        let p = palette(cx);
+    fn status(&self, a: &registry::App) -> AnyElement {
         match self.runs.get(&a.key) {
             Some(Run::Installing { .. }) => div()
                 .flex()
@@ -363,7 +458,7 @@ impl Lodestone {
                 .items_center()
                 .gap_2()
                 .child(spinner(eid("spin", &a.key)))
-                .child(div().display(Scale::X1, window).text_color(hsla(p.fg_dim)).child("INSTALLING"))
+                .child(tag("installing").accent())
                 .into_any_element(),
             Some(Run::Running { .. }) => tag("running").accent().into_any_element(),
             Some(Run::Exited(Some(0))) => tag("exited").outline().into_any_element(),
@@ -410,13 +505,41 @@ impl Lodestone {
         }
     }
 
-    /// The tile's buttons: Install, Run (plus Update), or Stop.
+    /// An app's logo from its repo, or its identicon until one is fetched.
+    fn mark(&self, a: &registry::App, size: gpui::Pixels, cx: &App) -> AnyElement {
+        let running = self.is_running(&a.key);
+        let Some(path) = self.icons.get(&a.key) else {
+            return avatar(a.name.to_string()).size(size).when(running, |av| av.presence(Presence::Online)).into_any_element();
+        };
+        let p = palette(cx);
+        div()
+            .relative()
+            .flex_none()
+            .size(size)
+            .border_1()
+            .border_color(hsla(p.line_strong))
+            .child(gpui::img(path.clone()).size_full())
+            .when(running, |el| {
+                el.child(div().absolute().right(-px(2.)).bottom(-px(2.)).size(px(8.)).bg(hsla(p.success)).border_1().border_color(hsla(p.bg)))
+            })
+            .into_any_element()
+    }
+
+    /// The bottom-left of a tile: Update when there's one to take, else the state.
+    fn tile_state(&self, a: &registry::App, cx: &mut Context<Self>) -> AnyElement {
+        if self.update_for(&a.key).is_none() || self.is_busy(&a.key) {
+            return self.status(a);
+        }
+        Button::new(eid("update", &a.key)).label("Update").icon(Icon::Down).primary().small().on_click(listen(cx, &a.key, Self::install)).into_any_element()
+    }
+
+    /// The tile's button: Install, Run, or Stop.
     fn actions(&self, a: &registry::App, cx: &mut Context<Self>) -> AnyElement {
         let key = a.key.clone();
         let row = div().flex().flex_row().gap_2();
         if self.is_running(&key) {
             return row
-                .child(Button::new(eid("stop", &key)).label("Stop").icon(Icon::Stop).ghost().small().on_click(listen(cx, &key, |this, key, cx| this.stop(&key, cx))))
+                .child(Button::new(eid("stop", &key)).label("Stop").icon(Icon::Stop).secondary().small().on_click(listen(cx, &key, |this, key, cx| this.stop(&key, cx))))
                 .into_any_element();
         }
         let installing = matches!(self.runs.get(&key), Some(Run::Installing { .. }));
@@ -434,20 +557,17 @@ impl Lodestone {
                 )
                 .into_any_element();
         }
-        row.when(self.update_for(&key).is_some() || installing, |row| {
-            row.child(Button::new(eid("update", &key)).label("Update").icon(Icon::Down).ghost().small().loading(installing).on_click(listen(cx, &key, Self::install)))
-        })
-        .child(Button::new(eid("run", &key)).label("Run").icon(Icon::Play).secondary().small().disabled(installing).on_click(listen(cx, &key, Self::launch)))
+        row.child(Button::new(eid("run", &key)).label("Run").icon(Icon::Play).secondary().small().disabled(installing).on_click(listen(cx, &key, Self::launch)))
         .into_any_element()
     }
 
-    fn tile(&self, a: &registry::App, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn tile(&self, a: &registry::App, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let key = a.key.clone();
         let selected = self.selected.as_ref() == Some(&key);
-        let running = self.is_running(&key);
         let about = if a.about.is_empty() { SharedString::from("—") } else { a.about.clone() };
         let actions = self.actions(a, cx);
+        let state = self.tile_state(a, cx);
 
         div()
             .id(eid("tile", &key))
@@ -470,13 +590,13 @@ impl Lodestone {
                             .flex_row()
                             .gap_3()
                             .items_start()
-                            .child(avatar(a.name.to_string()).size(px(32.)).when(running, |av| av.presence(Presence::Online)))
+                            .child(self.mark(a, px(32.), cx))
                             .child(div().flex_1().min_w_0().h(px(40.)).overflow_hidden().body(text::SM).text_color(hsla(p.fg_dim)).child(about)),
                     )
                     .child(div().flex_1())
                     .when_some(self.progress(&a.key), |d, v| d.child(progress_bar(v, px(6.), cx)))
                     .child(div().body(text::SM).text_color(hsla(p.fg_faint)).truncate().child(self.readout(a)))
-                    .child(div().flex().flex_row().items_center().child(self.status(a, window, cx)).child(div().flex_1()).child(actions)),
+                    .child(div().flex().flex_row().items_center().child(state).child(div().flex_1()).child(actions)),
             )
     }
 
@@ -492,7 +612,7 @@ impl Lodestone {
             };
             return div().flex_1().flex().items_center().justify_center().child(empty_state(title, hint, window, cx)).into_any_element();
         }
-        let tiles: Vec<AnyElement> = visible.iter().map(|a| self.tile(a, window, cx).into_any_element()).collect();
+        let tiles: Vec<AnyElement> = visible.iter().map(|a| self.tile(a, cx).into_any_element()).collect();
         scroll_area("library")
             .flex_1()
             .min_h_0()
@@ -560,7 +680,60 @@ impl Lodestone {
             .into_any_element()
     }
 
-    fn details(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    /// The banner when a newer Lodestone is out, coming in, or ready.
+    fn me_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let notes = |r: &registry::Release| {
+            let url = r.page.clone();
+            Button::new("me-notes").label("Release notes").icon(Icon::File).ghost().small().on_click(move |_, _, _| registry::open(url.as_ref()))
+        };
+        let update = |label: &'static str, cx: &mut Context<Self>| {
+            Button::new("me-update").label(label).icon(Icon::Down).primary().small().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.update_self(cx)))
+        };
+        let banner = match &self.me {
+            Me::Current => return None,
+            Me::Out(r) => alert("me", format!("Lodestone {} is out", r.tag))
+                .accent()
+                .message(format!("You have {}. The update is {}.", registry::VERSION, registry::megabytes(r.size)))
+                .action(update("Update Lodestone", cx))
+                .action(notes(r))
+                .on_close({
+                    let weak = cx.weak_entity();
+                    move |_, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            this.me = Me::Current;
+                            cx.notify();
+                        });
+                    }
+                }),
+            Me::Updating { release, done } => {
+                let got = done.load(Ordering::Relaxed);
+                let share = if release.size > 0 { got as f32 / release.size as f32 } else { 0. };
+                alert("me", format!("Updating Lodestone to {}", release.tag))
+                    .accent()
+                    .message(format!("{} / {}", registry::megabytes(got), registry::megabytes(release.size)))
+                    .action(div().w(px(240.)).child(progress_bar(share, px(6.), cx)))
+            }
+            Me::Ready { tag, .. } => alert("me", format!("Lodestone {tag} is ready"))
+                .success()
+                .message("Restart to run it. Apps you started keep running.")
+                .action(
+                    Button::new("me-restart")
+                        .label("Restart now")
+                        .icon(Icon::Refresh)
+                        .primary()
+                        .small()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.restart(cx))),
+                ),
+            Me::Failed { release, err } => alert("me", format!("Couldn't update Lodestone to {}", release.tag))
+                .danger()
+                .message(err.clone())
+                .action(update("Try again", cx))
+                .action(notes(release)),
+        };
+        Some(div().px(space::ROW).pt(space::ROW).child(banner).into_any_element())
+    }
+
+    fn details(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let app = self.selected.as_ref().and_then(|k| self.app(k)).cloned();
         let close = {
             let weak = cx.weak_entity();
@@ -586,7 +759,7 @@ impl Lodestone {
             )
             .when_some(a.release.as_ref(), |l, r| l.row("download", registry::megabytes(r.size)))
             .when_some(installed.as_ref(), |l, i| l.row("folder", i.exe.parent().map(|d| d.display().to_string()).unwrap_or_default()))
-            .row_with("state", self.status(&a, window, cx));
+            .row_with("state", self.status(&a));
         if let Some(Run::Running { child, since }) = self.runs.get(&key) {
             props = props.row("pid", child.id().to_string()).row("uptime", uptime(since.elapsed()));
         }
@@ -621,7 +794,15 @@ impl Lodestone {
 
         d = d
             .title(a.name.clone())
-            .child(div().body(text::BASE).child(if a.about.is_empty() { SharedString::from("No description on GitHub.") } else { a.about.clone() }))
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap_3()
+                    .child(self.mark(&a, px(48.), cx))
+                    .child(div().flex_1().min_w_0().body(text::BASE).child(if a.about.is_empty() { SharedString::from("No description on GitHub.") } else { a.about.clone() })),
+            )
             .when_some(self.progress(&key), |d, v| d.child(progress_bar(v, px(8.), cx)))
             .child(props)
             .when_some(
@@ -702,9 +883,20 @@ impl Render for Lodestone {
             }));
 
         let checking = matches!(self.sync, Sync::Checking);
+        let updates = self.updates().len();
         let bar = toolbar()
             .child(div().w(px(260.)).child(self.search.clone()))
             .spacer()
+            .child(
+                Button::new("update-all")
+                    .label(if updates > 0 { format!("Update all ({updates})") } else { "Update all".into() })
+                    .icon(Icon::Down)
+                    .small()
+                    .secondary()
+                    .disabled(updates == 0)
+                    .tooltip(if updates > 0 { "Install every newer release" } else { "Everything installed is up to date" })
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.update_all(cx))),
+            )
             .child(
                 Button::new("refresh")
                     .icon(Icon::Refresh)
@@ -721,7 +913,8 @@ impl Render for Lodestone {
             }));
 
         let page = if self.nav.as_ref() == "look" { self.look(window, cx) } else { self.library(window, cx) };
-        let details = self.details(window, cx);
+        let details = self.details(cx);
+        let banner = self.me_banner(cx);
 
         let root = div()
             .flex()
@@ -741,7 +934,7 @@ impl Render for Lodestone {
                     .flex_1()
                     .min_h_0()
                     .child(nav)
-                    .child(div().flex().flex_col().flex_1().min_w_0().when(self.nav.as_ref() != "look", |d| d.child(bar)).child(page)),
+                    .child(div().flex().flex_col().flex_1().min_w_0().when(self.nav.as_ref() != "look", |d| d.child(bar)).children(banner).child(page)),
             )
             .child(details)
             .child(
@@ -749,6 +942,7 @@ impl Render for Lodestone {
                     .left(format!("{apps} APPS · {installed} INSTALLED"))
                     .left_live(format!("{running} RUNNING"))
                     .right(sync)
+                    .right(registry::VERSION.to_uppercase())
                     .right(theme::scheme(cx).name.to_uppercase())
                     .right_live(format!("{}FPS", motion::fps())),
             );
@@ -765,6 +959,17 @@ impl Render for Lodestone {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--version") {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    // A self-update leaves the old binary aside. Right after the restart it
+    // may still be closing, so try again in a moment.
+    std::thread::spawn(|| {
+        registry::clear_set_aside();
+        std::thread::sleep(Duration::from_secs(5));
+        registry::clear_set_aside();
+    });
     gpui_platform::application().run(|cx: &mut App| {
         ferrite_design::init(Appearance::Dark, cx);
         cx.bind_keys([KeyBinding::new("ctrl-shift-p", TogglePalette, None)]);

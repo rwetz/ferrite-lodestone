@@ -4,6 +4,27 @@ All notable changes to Lodestone are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-10-09
+
+### Added
+
+- **Update all** in the toolbar (and the command palette) updates every
+  installed app with a newer release. A running app is skipped with a note
+  to stop it first.
+- Lodestone checks its own releases at start and on every refresh. A banner
+  offers **Update Lodestone**, which downloads and verifies the new build,
+  swaps it in place of the running binary, and offers **Restart now**.
+- The status bar shows Lodestone's version.
+- Tiles and the details drawer show each app's own logo (its repo's
+  `assets/logo.svg`, cached); an app without one keeps its identicon.
+
+### Fixed
+
+- A tile with an update no longer overflows: **Update** takes the state
+  tag's place on the left, and **Run** or **Stop** stays on the right.
+  Installing shows a compact tag instead of large text and a second
+  spinning button.
+
 ## [0.2.0] - 2026-10-07
 
 ### Changed
@@ -60,6 +81,7 @@ The first release.
 - The workspace folder comes from the command line, `LODESTONE_ROOT`, the
   checkout's parent folder, or the current directory, in that order.
 
+[0.3.0]: https://github.com/rwetz/ferrite-lodestone/releases/tag/v0.3.0
 [0.2.0]: https://github.com/rwetz/ferrite-lodestone/releases/tag/v0.2.0
 [0.1.1]: https://github.com/rwetz/ferrite-lodestone/releases/tag/v0.1.1
 [0.1.0]: https://github.com/rwetz/ferrite-lodestone/releases/tag/v0.1.0
