@@ -543,6 +543,11 @@ impl Lodestone {
                 .into_any_element();
         }
         let installing = matches!(self.runs.get(&key), Some(Run::Installing { .. }));
+        // The footer already shows installation status and progress. A second
+        // loading button wastes space, especially with the display face at 150%.
+        if installing {
+            return row.into_any_element();
+        }
         if !self.installed.contains_key(&key) {
             return row
                 .child(
@@ -572,6 +577,8 @@ impl Lodestone {
         div()
             .id(eid("tile", &key))
             .w(px(300.))
+            .max_w_full()
+            .flex_none()
             .p(px(1.))
             .when(selected, |d| d.bg(hsla(p.accent)))
             .cursor_pointer()
@@ -583,7 +590,7 @@ impl Lodestone {
             .child(
                 panel(a.name.clone())
                     .meta("APP")
-                    .h(px(176.))
+                    .min_h(px(176.))
                     .child(
                         div()
                             .flex()
@@ -596,7 +603,17 @@ impl Lodestone {
                     .child(div().flex_1())
                     .when_some(self.progress(&a.key), |d, v| d.child(progress_bar(v, px(6.), cx)))
                     .child(div().body(text::SM).text_color(hsla(p.fg_faint)).truncate().child(self.readout(a)))
-                    .child(div().flex().flex_row().items_center().child(state).child(div().flex_1()).child(actions)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_wrap()
+                            .items_center()
+                            .justify_between()
+                            .gap_2()
+                            .child(div().flex_none().child(state))
+                            .child(div().flex_none().child(actions)),
+                    ),
             )
     }
 
