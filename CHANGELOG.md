@@ -45,7 +45,7 @@ All notable changes to Lodestone are listed here. The format follows
   platform, checks it against `SHA256SUMS.txt`, and unpacks it under
   `<data>/ferrite/apps`. **Run** starts that binary at once; nothing is
   compiled, and no Rust toolchain is needed.
-- A tile shows the version and the release's age (`v0.1.1 Â· 8 hours ago`)
+- A tile shows the version and the release's age (`v0.1.1 · 8 hours ago`)
   instead of the last commit.
 - The Gallery page and folder scanning are gone; there is an Installed page.
 
