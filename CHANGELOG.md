@@ -4,6 +4,17 @@ All notable changes to Lodestone are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Per-user Windows setup packaging with Start menu shortcuts and Installed apps registration.
+- Uninstall downloaded apps from the details drawer, preserving settings and application data.
+
+### Security
+
+- Require release checksums before installing and reject invalid app names before filesystem changes.
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
@@ -34,7 +45,7 @@ All notable changes to Lodestone are listed here. The format follows
   platform, checks it against `SHA256SUMS.txt`, and unpacks it under
   `<data>/ferrite/apps`. **Run** starts that binary at once; nothing is
   compiled, and no Rust toolchain is needed.
-- A tile shows the version and the release's age (`v0.1.1 · 8 hours ago`)
+- A tile shows the version and the release's age (`v0.1.1 Â· 8 hours ago`)
   instead of the last commit.
 - The Gallery page and folder scanning are gone; there is an Installed page.
 

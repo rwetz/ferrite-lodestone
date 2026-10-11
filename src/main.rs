@@ -2,8 +2,8 @@
 //!
 //! Lists the GitHub repos tagged `ferrite-app`, installs an app from its
 //! latest release (no compiling), shows which are installed and which have
-//! updates, starts them, and keeps one shared look — scheme, appearance,
-//! refresh rate, density — that every app it starts inherits through the
+//! updates, starts them, and keeps one shared look â€” scheme, appearance,
+//! refresh rate, density â€” that every app it starts inherits through the
 //! `FERRITE_*` variables.
 //!
 //!     cargo run
@@ -35,6 +35,7 @@ const DENSITIES: [(&str, &str); 3] = [("compact", "Compact"), ("cozy", "Cozy"), 
 enum Run {
     /// Downloading and unpacking; `done` counts the archive's bytes.
     Installing { done: Arc<AtomicU64>, total: u64 },
+    Removing,
     Running { child: Child, since: Instant },
     Exited(Option<i32>),
     /// Stopped from Lodestone (a kill, so its exit code means nothing).
@@ -71,6 +72,7 @@ struct Lodestone {
     nav: SharedString,
     selected: Option<SharedString>,
     drawer: bool,
+    uninstall_pending: Option<SharedString>,
     shared: Shared,
     /// Bumped on every sync so the tile grid cascades in again.
     scans: u32,
@@ -84,7 +86,7 @@ struct Lodestone {
 
 impl Lodestone {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| TextInput::new(window, cx).placeholder("Filter apps…").prompt(">"));
+        let search = cx.new(|cx| TextInput::new(window, cx).placeholder("Filter appsâ€¦").prompt(">"));
         let _search = cx.subscribe(&search, |_, _, _: &InputEvent, cx| cx.notify());
 
         // Child processes and downloads: notice exits, move progress bars,
@@ -110,6 +112,7 @@ impl Lodestone {
             nav: "apps".into(),
             selected: None,
             drawer: false,
+            uninstall_pending: None,
             shared: Shared::load(),
             scans: 0,
             ticks: 0,
@@ -126,7 +129,7 @@ impl Lodestone {
         hub
     }
 
-    // ── Catalog ──────────────────────────────────────────────────────────
+    // â”€â”€ Catalog â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn sync(&mut self, cx: &mut Context<Self>) {
         if matches!(self.sync, Sync::Checking) && self.scans > 0 {
@@ -181,7 +184,7 @@ impl Lodestone {
     }
 
     fn is_busy(&self, key: &SharedString) -> bool {
-        matches!(self.runs.get(key), Some(Run::Installing { .. } | Run::Running { .. }))
+        matches!(self.runs.get(key), Some(Run::Installing { .. } | Run::Running { .. } | Run::Removing))
     }
 
     /// The newer release, when one is out past the installed version.
@@ -205,7 +208,33 @@ impl Lodestone {
             .collect()
     }
 
-    // ── Installing and launching ─────────────────────────────────────────
+    // â”€â”€ Installing and launching â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    fn uninstall(&mut self, key: SharedString, cx: &mut Context<Self>) {
+        self.uninstall_pending = None;
+        if self.is_busy(&key) || !self.installed.contains_key(&key) {
+            return;
+        }
+        let name = self.app(&key).map_or(key.clone(), |a| a.name.clone());
+        // Reserve the app while the filesystem operation runs off the UI thread.
+        self.runs.insert(key.clone(), Run::Removing);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let job = key.clone();
+            let result = cx.background_executor().spawn(async move { registry::uninstall(&job) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.runs.remove(&key);
+                this.refresh_installed();
+                let note = match result {
+                    Ok(()) => toast(format!("{name} uninstalled")).success(),
+                    Err(err) => toast(format!("Couldn't uninstall {name}")).danger().message(err),
+                };
+                this.toaster.update(cx, |t, cx| t.push(note, cx));
+                this.set_commands(cx);
+                cx.notify();
+            });
+        }).detach();
+    }
 
     /// Install, or update to, the latest release.
     fn install(&mut self, key: SharedString, cx: &mut Context<Self>) {
@@ -235,6 +264,7 @@ impl Lodestone {
                         this.runs.insert(key, Run::Failed(err));
                     }
                 }
+                this.set_commands(cx);
                 cx.notify();
             });
         })
@@ -245,7 +275,7 @@ impl Lodestone {
     fn updates(&self) -> Vec<SharedString> {
         self.apps
             .iter()
-            .filter(|a| self.update_for(&a.key).is_some() && !matches!(self.runs.get(&a.key), Some(Run::Installing { .. })))
+            .filter(|a| self.update_for(&a.key).is_some() && !matches!(self.runs.get(&a.key), Some(Run::Installing { .. } | Run::Removing)))
             .map(|a| a.key.clone())
             .collect()
     }
@@ -263,7 +293,7 @@ impl Lodestone {
         }
     }
 
-    // ── Updating Lodestone ───────────────────────────────────────────────
+    // â”€â”€ Updating Lodestone â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn update_self(&mut self, cx: &mut Context<Self>) {
         let release = match &self.me {
@@ -356,7 +386,7 @@ impl Lodestone {
         }
     }
 
-    // ── The shared look ──────────────────────────────────────────────────
+    // â”€â”€ The shared look â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn apply_shared(&self, window: &mut Window, cx: &mut App) {
         let s = &self.shared;
@@ -389,7 +419,7 @@ impl Lodestone {
         cx.notify();
     }
 
-    // ── Commands ─────────────────────────────────────────────────────────
+    // â”€â”€ Commands â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn set_commands(&self, cx: &mut Context<Self>) {
         let weak = cx.weak_entity();
@@ -433,6 +463,17 @@ impl Lodestone {
             }),
         ];
         for a in &self.apps {
+            if self.installed.contains_key(&a.key) {
+                let (weak, key) = (weak.clone(), a.key.clone());
+                commands.push(command(format!("Uninstall {}", a.name)).group("Manage apps").icon(Icon::Trash).on_run(move |_, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        if !this.is_busy(&key) {
+                            this.uninstall_pending = Some(key.clone());
+                            cx.notify();
+                        }
+                    });
+                }));
+            }
             let (weak, key) = (weak.clone(), a.key.clone());
             let verb = if self.installed.contains_key(&a.key) { "Launch" } else { "Install" };
             commands.push(command(format!("{verb} {}", a.name)).group(verb).icon(Icon::Play).on_run(move |_, cx| {
@@ -448,7 +489,7 @@ impl Lodestone {
         self.palette.update(cx, |p, cx| p.set_commands(commands, cx));
     }
 
-    // ── Views ────────────────────────────────────────────────────────────
+    // â”€â”€ Views â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn status(&self, a: &registry::App) -> AnyElement {
         match self.runs.get(&a.key) {
@@ -461,6 +502,7 @@ impl Lodestone {
                 .child(tag("installing").accent())
                 .into_any_element(),
             Some(Run::Running { .. }) => tag("running").accent().into_any_element(),
+            Some(Run::Removing) => tag("uninstalling").outline().into_any_element(),
             Some(Run::Exited(Some(0))) => tag("exited").outline().into_any_element(),
             Some(Run::Stopped) => tag("stopped").outline().into_any_element(),
             Some(Run::Exited(code)) => tag(format!("exit {}", code.map_or("?".into(), |c| c.to_string()))).warning().into_any_element(),
@@ -472,15 +514,15 @@ impl Lodestone {
         }
     }
 
-    /// `v0.1.1 · 8 hours ago`: the installed version (or the latest, before
+    /// `v0.1.1 Â· 8 hours ago`: the installed version (or the latest, before
     /// an install) and when that release came out.
     fn version_line(&self, a: &registry::App) -> String {
         let latest = a.release.as_ref();
         let released = |tag: &str| latest.filter(|r| r.tag == tag).map(|r| registry::ago(registry::now() - r.published));
         match (self.installed.get(&a.key), latest) {
-            (Some(i), Some(r)) if registry::is_newer(&r.tag, &i.tag) => format!("{} · {} is out", i.tag, r.tag),
-            (Some(i), _) => released(&i.tag).map_or(i.tag.clone(), |ago| format!("{} · {ago}", i.tag)),
-            (None, Some(r)) => format!("{} · {}", r.tag, registry::ago(registry::now() - r.published)),
+            (Some(i), Some(r)) if registry::is_newer(&r.tag, &i.tag) => format!("{} Â· {} is out", i.tag, r.tag),
+            (Some(i), _) => released(&i.tag).map_or(i.tag.clone(), |ago| format!("{} Â· {ago}", i.tag)),
+            (None, Some(r)) => format!("{} Â· {}", r.tag, registry::ago(registry::now() - r.published)),
             (None, None) => "no release yet".into(),
         }
     }
@@ -488,7 +530,8 @@ impl Lodestone {
     /// The live line under a tile.
     fn readout(&self, a: &registry::App) -> String {
         match self.runs.get(&a.key) {
-            Some(Run::Running { child, since }) => format!("PID {} · UP {}", child.id(), uptime(since.elapsed())),
+            Some(Run::Removing) => "Removing app filesâ€¦".into(),
+            Some(Run::Running { child, since }) => format!("PID {} Â· UP {}", child.id(), uptime(since.elapsed())),
             Some(Run::Installing { done, total }) => {
                 format!("{} / {}", registry::megabytes(done.load(Ordering::Relaxed)), registry::megabytes(*total))
             }
@@ -542,7 +585,7 @@ impl Lodestone {
                 .child(Button::new(eid("stop", &key)).label("Stop").icon(Icon::Stop).secondary().small().on_click(listen(cx, &key, |this, key, cx| this.stop(&key, cx))))
                 .into_any_element();
         }
-        let installing = matches!(self.runs.get(&key), Some(Run::Installing { .. }));
+        let installing = matches!(self.runs.get(&key), Some(Run::Installing { .. } | Run::Removing));
         // The footer already shows installation status and progress. A second
         // loading button wastes space, especially with the display face at 150%.
         if installing {
@@ -570,7 +613,7 @@ impl Lodestone {
         let p = palette(cx);
         let key = a.key.clone();
         let selected = self.selected.as_ref() == Some(&key);
-        let about = if a.about.is_empty() { SharedString::from("—") } else { a.about.clone() };
+        let about = if a.about.is_empty() { SharedString::from("â€”") } else { a.about.clone() };
         let actions = self.actions(a, cx);
         let state = self.tile_state(a, cx);
 
@@ -765,14 +808,14 @@ impl Lodestone {
         let Some(a) = app else { return d };
         let key = a.key.clone();
         let running = self.is_running(&key);
-        let installing = matches!(self.runs.get(&key), Some(Run::Installing { .. }));
+        let installing = matches!(self.runs.get(&key), Some(Run::Installing { .. } | Run::Removing));
         let installed = self.installed.get(&key).cloned();
 
         let mut props = property_list()
             .row("installed", installed.as_ref().map_or("no".into(), |i| i.tag.clone()))
             .row(
                 "latest",
-                a.release.as_ref().map_or("no release yet".into(), |r| format!("{} · {}", r.tag, registry::ago(registry::now() - r.published))),
+                a.release.as_ref().map_or("no release yet".into(), |r| format!("{} Â· {}", r.tag, registry::ago(registry::now() - r.published))),
             )
             .when_some(a.release.as_ref(), |l, r| l.row("download", registry::megabytes(r.size)))
             .when_some(installed.as_ref(), |l, i| l.row("folder", i.exe.parent().map(|d| d.display().to_string()).unwrap_or_default()))
@@ -837,6 +880,13 @@ impl Lodestone {
                     .gap_2()
                     .child(primary)
                     .children(update)
+                    .when(installed.is_some(), |row| row.child(
+                        Button::new("drawer-uninstall").label("Uninstall").icon(Icon::Trash).danger()
+                            .disabled(running || installing).on_click(cx.listener({
+                                let key = key.clone();
+                                move |this, _: &ClickEvent, _, cx| { this.uninstall_pending = Some(key.clone()); cx.notify(); }
+                            }))
+                    ))
                     .when_some(folder, |row, dir| {
                         row.child(Button::new("reveal").label("Open folder").icon(Icon::Folder).secondary().on_click(move |_, _, _| registry::open(dir.as_os_str())))
                     })
@@ -892,7 +942,7 @@ impl Render for Lodestone {
             .selected(self.nav.clone())
             .footer(div().body(text::SM).text_color(hsla(p.fg_faint)).truncate().child(match &self.sync {
                 Sync::Offline(err) => format!("offline: {err}"),
-                _ => format!("github.com/{} · {}", registry::OWNER, registry::TOPIC),
+                _ => format!("github.com/{} Â· {}", registry::OWNER, registry::TOPIC),
             }))
             .on_select(cx.listener(|this, key: &SharedString, _, cx| {
                 this.nav = key.clone();
@@ -924,7 +974,7 @@ impl Render for Lodestone {
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.sync(cx))),
             )
             .separator()
-            .child(Button::new("cmd").icon(Icon::Search).small().tooltip("Commands · Ctrl+Shift+P").on_click({
+            .child(Button::new("cmd").icon(Icon::Search).small().tooltip("Commands Â· Ctrl+Shift+P").on_click({
                 let palette = self.palette.clone();
                 move |_, window, cx| palette.update(cx, |p, cx| p.open(window, cx))
             }));
@@ -954,9 +1004,20 @@ impl Render for Lodestone {
                     .child(div().flex().flex_col().flex_1().min_w_0().when(self.nav.as_ref() != "look", |d| d.child(bar)).children(banner).child(page)),
             )
             .child(details)
+            .child(dialog("uninstall-confirm").open(self.uninstall_pending.is_some())
+                .title("Uninstall app?").description("Remove downloaded app files. Your app data and shared Ferrite settings stay on this computer.")
+                .danger().cancel("Keep app").confirm("Uninstall", {
+                    let weak = cx.weak_entity();
+                    move |_, cx| { let _ = weak.update(cx, |this, cx| {
+                        if let Some(key) = this.uninstall_pending.clone() { this.uninstall(key, cx); }
+                    }); }
+                }).on_close({
+                    let weak = cx.weak_entity();
+                    move |_, cx| { let _ = weak.update(cx, |this, cx| { this.uninstall_pending = None; cx.notify(); }); }
+                }))
             .child(
                 status_bar()
-                    .left(format!("{apps} APPS · {installed} INSTALLED"))
+                    .left(format!("{apps} APPS Â· {installed} INSTALLED"))
                     .left_live(format!("{running} RUNNING"))
                     .right(sync)
                     .right(registry::VERSION.to_uppercase())

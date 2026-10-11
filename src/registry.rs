@@ -330,6 +330,30 @@ pub fn installed(key: &str) -> Option<Installed> {
     exe.exists().then_some(Installed { tag, exe })
 }
 
+/// Only a single repository name can address an installation.
+fn valid_key(key: &str) -> bool {
+    key.starts_with("ferrite-") && key.len() > 8 && key.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Remove Lodestone's downloaded binaries, keeping the app's own data and settings.
+pub fn uninstall(key: &str) -> Result<(), String> {
+    let root = apps_dir().ok_or("no data directory")?;
+    uninstall_from(&root, key)
+}
+
+fn uninstall_from(root: &Path, key: &str) -> Result<(), String> {
+    if !valid_key(key) {
+        return Err("invalid app repository name".into());
+    }
+    let base = root.canonicalize().map_err(|e| e.to_string())?;
+    let path = base.join(key);
+    let metadata = std::fs::symlink_metadata(&path).map_err(|e| e.to_string())?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() || path.canonicalize().map_err(|e| e.to_string())?.parent() != Some(base.as_path()) {
+        return Err("the app folder is outside Lodestone's installation directory".into());
+    }
+    std::fs::remove_dir_all(path).map_err(|e| format!("couldn't uninstall; close the app and try again: {e}"))
+}
+
 /// `<name>` or `<name>.exe`, up to two folders down (the archive's own folder).
 fn find_exe(dir: &Path, name: &str, depth: u8) -> Option<PathBuf> {
     let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
@@ -345,8 +369,11 @@ fn find_exe(dir: &Path, name: &str, depth: u8) -> Option<PathBuf> {
 fn download(r: &Release, root: &Path, dest: &Path, done: &AtomicU64) -> Result<(), String> {
     let expected = match &r.sums_url {
         Some(url) => Some(sum_for(&get_text(url)?, &r.asset).ok_or("the release's SHA256SUMS.txt doesn't list this archive")?),
-        None => None,
+        None => return Err("the release has no SHA256SUMS.txt; installation requires a verified archive".into()),
     };
+    if expected.as_ref().is_some_and(|hash| hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err("the release checksum is not a SHA-256 digest".into());
+    }
 
     let archive = root.join(&r.asset);
     let mut body = get(&r.asset_url)?;
@@ -386,6 +413,9 @@ fn download(r: &Release, root: &Path, dest: &Path, done: &AtomicU64) -> Result<(
 /// the main thread). The previous version's folder is removed afterwards
 /// when it isn't in use.
 pub fn install(app: &App, done: &AtomicU64) -> Result<Installed, String> {
+    if !valid_key(&app.key) {
+        return Err("invalid app repository name".into());
+    }
     let r = app.release.as_ref().ok_or("no release for this platform yet")?;
     let root = apps_dir().ok_or("no data directory")?.join(app.key.as_ref());
     std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
@@ -555,6 +585,21 @@ impl Shared {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uninstall_is_confined_and_keeps_other_apps() {
+        let root = std::env::temp_dir().join(format!("lodestone-uninstall-{}-{}", std::process::id(), now()));
+        std::fs::create_dir_all(root.join("ferrite-test/v1")).unwrap();
+        std::fs::create_dir_all(root.join("ferrite-keep")).unwrap();
+        std::fs::write(root.join("ferrite-test/installed"), "v1\nv1/app.exe\n").unwrap();
+        for bad in ["", "..", "ferrite-../keep", "ferrite-test/../ferrite-keep", "C:\\Windows", "ferrite-test\\child"] {
+            assert!(uninstall_from(&root, bad).is_err());
+        }
+        uninstall_from(&root, "ferrite-test").unwrap();
+        assert!(!root.join("ferrite-test").exists());
+        assert!(root.join("ferrite-keep").is_dir());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn names_read_well() {
