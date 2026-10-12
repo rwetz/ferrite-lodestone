@@ -30,6 +30,10 @@ use registry::{Installed, Shared};
 const APPEARANCES: [(&str, &str); 3] = [("dark", "Dark"), ("light", "Light"), ("system", "System")];
 const FPS: [u32; 4] = [25, 60, 120, 240];
 const DENSITIES: [(&str, &str); 3] = [("compact", "Compact"), ("cozy", "Cozy"), ("roomy", "Roomy")];
+/// The narrowest a tile gets before the grid drops a column.
+const TILE_MIN: f32 = 280.;
+/// The sidebar's default width, which the grid sits beside.
+const NAV_W: f32 = 220.;
 
 /// What an app is doing, or what happened the last time.
 enum Run {
@@ -609,7 +613,7 @@ impl Lodestone {
         .into_any_element()
     }
 
-    fn tile(&self, a: &registry::App, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn tile(&self, a: &registry::App, width: gpui::Pixels, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let p = palette(cx);
         let key = a.key.clone();
         let selected = self.selected.as_ref() == Some(&key);
@@ -619,7 +623,7 @@ impl Lodestone {
 
         div()
             .id(eid("tile", &key))
-            .w(px(300.))
+            .w(width)
             .max_w_full()
             .flex_none()
             .p(px(1.))
@@ -633,7 +637,7 @@ impl Lodestone {
             .child(
                 panel(a.name.clone())
                     .meta("APP")
-                    .min_h(px(176.))
+                    .min_h(px(196.))
                     .child(
                         div()
                             .flex()
@@ -641,7 +645,7 @@ impl Lodestone {
                             .gap_3()
                             .items_start()
                             .child(self.mark(a, px(32.), cx))
-                            .child(div().flex_1().min_w_0().h(px(40.)).overflow_hidden().body(text::SM).text_color(hsla(p.fg_dim)).child(about)),
+                            .child(div().flex_1().min_w_0().h(px(60.)).overflow_hidden().body(text::SM).text_color(hsla(p.fg_dim)).child(about)),
                     )
                     .child(div().flex_1())
                     .when_some(self.progress(&a.key), |d, v| d.child(progress_bar(v, px(6.), cx)))
@@ -672,7 +676,14 @@ impl Lodestone {
             };
             return div().flex_1().flex().items_center().justify_center().child(empty_state(title, hint, window, cx)).into_any_element();
         }
-        let tiles: Vec<AnyElement> = visible.iter().map(|a| self.tile(a, cx).into_any_element()).collect();
+        // Tiles share the row evenly instead of leaving a ragged gap: as many
+        // columns as fit at TILE_MIN, each widened to fill. The row is the
+        // window less the sidebar, the grid's padding, the scrollbar and the frame.
+        let gap = f32::from(space::ROW);
+        let row = f32::from(window.viewport_size().width) - NAV_W - 2. * gap - f32::from(ferrite_design::components::scroll::WIDTH) - 4.;
+        let cols = ((row + gap) / (TILE_MIN + gap)).floor().max(1.);
+        let width = px(((row - gap * (cols - 1.)) / cols).floor().max(TILE_MIN.min(row)));
+        let tiles: Vec<AnyElement> = visible.iter().map(|a| self.tile(a, width, cx).into_any_element()).collect();
         scroll_area("library")
             .flex_1()
             .min_h_0()
@@ -954,16 +965,15 @@ impl Render for Lodestone {
         let bar = toolbar()
             .child(div().w(px(260.)).child(self.search.clone()))
             .spacer()
-            .child(
+            .when(updates > 0, |bar| bar.child(
                 Button::new("update-all")
-                    .label(if updates > 0 { format!("Update all ({updates})") } else { "Update all".into() })
+                    .label(format!("Update all ({updates})"))
                     .icon(Icon::Down)
                     .small()
                     .secondary()
-                    .disabled(updates == 0)
-                    .tooltip(if updates > 0 { "Install every newer release" } else { "Everything installed is up to date" })
+                    .tooltip("Install every newer release")
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.update_all(cx))),
-            )
+            ))
             .child(
                 Button::new("refresh")
                     .icon(Icon::Refresh)

@@ -15,6 +15,11 @@ All notable changes to Lodestone are listed here. The format follows
 
 - Require release checksums before installing and reject invalid app names before filesystem changes.
 
+### Fixed
+
+- Hide the toolbar's Update all button when no installed apps have an available update.
+- App tiles share the row evenly at any window width, and descriptions get three lines instead of being cut off at two.
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
